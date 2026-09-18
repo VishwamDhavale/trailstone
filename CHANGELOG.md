@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1
+
+**Fixed**
+
+- **The version it reported was wrong.** `VERSION` was a hardcoded literal that never got
+  bumped, so the published 0.2.0 announced itself as **0.1.0** to every MCP client and
+  stamped 0.1.0 on every `report --anon` — misattributing the one number this project
+  asks users to send back. It now reads `package.json`, and the selfcheck asserts the two
+  can never drift again.
+- **`trailstone --help` outside a git repo said "not a git repo" and exited 2.** That is
+  precisely where a fresh `npm i -g trailstone` is first run. Help and `--version` now
+  answer anywhere; only real commands hit the guard, and the guard says what to do about it
+  (`cd` into a repo, `git init`, or `trailstone demo`).
+
+**Added**
+
+- `--version` / `-v` prints just the version; the help banner carries version and node.
+
 ## 0.2.0 — Apache-2.0
 
 **Fixed**

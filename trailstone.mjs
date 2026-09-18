@@ -52,7 +52,12 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const VERSION = "0.1.0";
+// Single source of truth is package.json (shipped beside this file); the literal is the
+// fallback for a bare copy of the script, and --selfcheck asserts the two never drift.
+const VERSION = (() => {
+  try { return JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8")).version || "0.2.0"; }
+  catch { return "0.2.0"; }  // a bare copy of the script with no package.json beside it
+})();
 const LEDGER = join(".trailstone", "decisions.yml");
 const HEADER = `# Trailstone decision ledger. One entry per decision: what was decided, why, and the
 # paths it governs. Decisions are immutable — reverse one with a new entry carrying
@@ -601,7 +606,13 @@ async function main(argv) {
   // demo builds its own repo; capture-health reads a log; install is machine-wide — none need a repo.
   // `mcp` is exempt too: it resolves its own repo from --repo / TRAILSTONE_REPO, because
   // desktop MCP clients launch a server with an arbitrary cwd. Exiting here broke all of them.
-  if (!r && !["--selfcheck", "install", "capture-health", "demo", "hook", "doctor", "mcp"].includes(cmd)) { console.error("not a git repo"); process.exit(2); }
+  // Help and version must work anywhere: outside a repo is exactly where someone types their
+  // first command after `npm i -g trailstone`, and "not a git repo" is a terrible first answer.
+  const HELPISH = [undefined, "--help", "-h", "help", "--version", "-v", "version"];
+  if (!r && !["--selfcheck", "install", "capture-health", "demo", "hook", "doctor", "mcp"].includes(cmd) && !HELPISH.includes(cmd)) {
+    console.error(`not a git repository: ${process.cwd()}\n\`trailstone\` reads and writes a ledger in your repo — cd into one, or \`git init\`.\nNo repo to hand? \`trailstone demo\` shows the whole loop on a throwaway one.`);
+    process.exit(2);
+  }
   if (!HAS_GLOB && cmd !== "hook") console.error(`WARNING: this node (${process.version}) has no path.matchesGlob — glob scopes like "src/**/*.ts" will match NOTHING and decisions using them will govern nothing. Upgrade to node 20.17+ or use plain paths/directories as scopes.`);
   switch (cmd) {
     case "init": {
@@ -681,7 +692,8 @@ async function main(argv) {
     case "install": return install(f);
     case "uninstall": return uninstall();
     case "--selfcheck": return selfcheck();
-    default: console.log(readFileSync(SELF, "utf8").split("\n").slice(1, 30).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+    case "--version": case "-v": case "version": console.log(VERSION); return;
+    default: console.log(readFileSync(SELF, "utf8").split("\n").slice(1, 30).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + `\n\ntrailstone ${VERSION} · node ${process.version}`);
   }
 }
 const rel = (r, p) => toPosix(isAbsolute(p) ? relative(r, p) : p);
@@ -1216,6 +1228,29 @@ function selfcheck() {
     ok(left.length === 0, `uninstall removes every hook it wrote (${left.length} left)`);
     ok(existsSync(join(dir, LEDGER)), "uninstall does NOT delete the ledger");
   }
+
+  // The version the tool REPORTS is the version that shipped. It drifted once: the published
+  // 0.2.0 announced itself as 0.1.0 to every MCP client and stamped 0.1.0 on every report.
+  {
+    const pkg = JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8"));
+    ok(VERSION === pkg.version, `VERSION (${VERSION}) matches package.json (${pkg.version})`);
+  }
+
+  // Help and version must answer OUTSIDE a git repo — that is where a new install is first run.
+  {
+    const dir = join(tmpdir(), `trailstone-norepo-${Date.now()}`); mkdirSync(dir, { recursive: true });
+    for (const a of [["--version"], ["--help"], []]) {
+      const p = spawnSync(process.execPath, [SELF, ...a], { cwd: dir, encoding: "utf8" });
+      ok(p.status === 0, `\`trailstone ${a[0] || "<no args>"}\` works with no git repo (exit ${p.status})`);
+      ok(!/not a git repos/.test(p.stderr || ""), `\`trailstone ${a[0] || "<no args>"}\` does not say "not a git repository"`);
+    }
+    ok(spawnSync(process.execPath, [SELF, "--version"], { cwd: dir, encoding: "utf8" }).stdout.trim() === VERSION, "--version prints the version and nothing else");
+    // but a real command still refuses, and says what to do about it
+    const bad = spawnSync(process.execPath, [SELF, "list"], { cwd: dir, encoding: "utf8" });
+    ok(bad.status === 2 && /git init|cd into one/.test(bad.stderr), "a real command outside a repo still fails, with an actionable message");
+    rmSync(dir, { recursive: true, force: true });
+  }
+
   console.log("trailstone selfcheck: OK");
 }
 

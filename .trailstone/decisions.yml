@@ -104,3 +104,17 @@
   why: The tool writes into ~/.claude/settings.json and .git/hooks; without a way out people must hand-edit JSON to remove it. Decisions and repo content are the user's, so uninstall does not touch them.
   scope:
     - trailstone.mjs
+- id: d_dbf147f1
+  at: 2026-09-18T19:03:23.591Z
+  by: vishwamdhavale
+  decision: Read VERSION from package.json at startup, with the literal only as a fallback for a bare script copy
+  why: "The hardcoded literal drifted: published 0.2.0 announced itself as 0.1.0 to every MCP client and stamped 0.1.0 on every report --anon, misattributing the one metric we ask users to send back. Selfcheck now asserts the two agree."
+  scope:
+    - trailstone.mjs
+- id: d_998e659d
+  at: 2026-09-18T19:03:23.706Z
+  by: vishwamdhavale
+  decision: Help and --version answer outside a git repository; only real commands hit the repo guard, and its message names the fix
+  why: Outside a repo is exactly where a fresh npm i -g is first run, and every command including --help answered 'not a git repo' with no guidance — the worst possible first impression for a tool whose whole pitch is legibility.
+  scope:
+    - trailstone.mjs
