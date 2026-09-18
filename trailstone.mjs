@@ -373,7 +373,7 @@ function logCapture(status, detail) {
 // every Windows user. `where`/`which` are the portable pair, and need no shell.
 const hasClaude = () => { try { execFileSync(process.platform === "win32" ? "where" : "which", ["claude"], { stdio: "ignore" }); return true; } catch { return false; } };
 
-const PROMPT = (userAsk, assistant, governing, touched) =>
+export const PROMPT = (userAsk, assistant, governing, touched) =>
   `You extract COMMITTED DECISIONS from a coding-assistant turn, for a durable decision log,
 and flag where the turn DEPARTED FROM a decision already in force.
 
@@ -803,8 +803,15 @@ function doctor() {
     catch { say(false, "ledger is NOT committed — it binds nobody until you commit it"); }
   }
 
-  const hooks = (() => { try { return JSON.stringify(readJson(join(homedir(), ".claude", "settings.json"), {}).hooks ?? {}); } catch { return ""; } })();
-  const n = (hooks.match(/trailstone\.mjs hook/g) || []).length;
+  // Count the hook ENTRIES structurally. A regex over the serialised settings used to look
+  // for `trailstone.mjs hook`, and broke the moment install started quoting the path
+  // (`node "…/trailstone.mjs" hook`) — doctor then reported 0/4 while all four were live,
+  // which is the exact false "not watching" this command exists to prevent.
+  const n = (() => { try {
+    const h = readJson(join(homedir(), ".claude", "settings.json"), {}).hooks ?? {};
+    return Object.values(h).flat().flatMap((g) => g.hooks || [])
+      .filter((k) => (k.command || "").includes(basename(SELF)) && /\bhook\b\s*$/.test(k.command || "")).length;
+  } catch { return 0; } })();
   say(n >= 4, n >= 4 ? "all 4 Claude Code hooks installed" : `only ${n}/4 hooks installed — run \`install\``);
   say(existsSync(join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push")), "pre-push guard installed");
 
@@ -1149,6 +1156,11 @@ function selfcheck() {
     ok(cmds.every((c) => !c.includes("\\")), "hook commands contain no backslashes (git-bash on Windows)");
     const pp = readFileSync(join(dir, ".git", "hooks", "pre-push"), "utf8");
     ok(/exec node "/.test(pp) && !pp.includes("\\"), "pre-push quotes the path and uses forward slashes");
+    // …and doctor must SEE what install wrote. A regex over the settings once missed the
+    // quoted command and reported 0/4 while all four were live — a false "not watching"
+    // in the one command whose entire job is answering "is it watching?".
+    const doc = spawnSync(process.execPath, [SELF, "doctor"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } });
+    ok(/all 4 Claude Code hooks installed/.test(doc.stdout), `doctor sees the hooks install just wrote (got: ${(doc.stdout.split("\n").find((l) => l.includes("hook")) || "").trim()})`);
   }
   console.log("trailstone selfcheck: OK");
 }

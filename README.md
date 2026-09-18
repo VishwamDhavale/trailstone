@@ -264,6 +264,13 @@ Review them as what they are — a diff in a file you own:
 
 Fires that were right versus fires that were wrong. Nothing else.
 
+**What it looked like on a real project.** One reversal on a 79-file product repo flagged
+**9 governed files**: 7 were re-checked and still held, 1 genuinely needed rework, and 1 was
+a false positive the developer marked `--wrong`. **89% precision.** That is the shape to
+expect — most flagged files still comply, and the flag's job is to force the re-check that
+finds the one that does not. (Measured, not projected; it was a deliberate re-validation
+sweep after a real decision changed, not a surprise catch.)
+
 When a stale warning fires and the file genuinely needed re-checking, `validate <id>
 --scope <file>` records the good fire. When it fired on a file that never rested on
 that decision, `validate <id> --scope <file> --wrong` records the false positive.

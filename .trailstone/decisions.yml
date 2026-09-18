@@ -66,3 +66,10 @@
   why: "On Windows node's relative() returns backslashes, so the hook computed src\\auth\\session.js and matched no forward-slash scope: it surfaced nothing and said nothing — a silent failure on a whole platform. stale() was unaffected because it reads git ls-files directly, which is why only one selfcheck assertion caught it. Found by the 3-OS CI matrix on the first push."
   scope:
     - trailstone.mjs
+- id: d_83dbd17c
+  at: 2026-09-18T14:20:25.974Z
+  by: vishwamdhavale
+  decision: doctor counts hook entries structurally (parse settings.json, match basename + trailing 'hook'), never by regex over the serialised JSON.
+  why: install began quoting the script path, so the old /trailstone.mjs hook/ regex matched nothing and doctor reported 0/4 hooks while all four were live — a false 'not watching' in the one command whose job is answering that question. Found while migrating a real project. Selfcheck now asserts doctor sees what install wrote, and the assertion was verified to fail when the regex form is restored.
+  scope:
+    - trailstone.mjs
