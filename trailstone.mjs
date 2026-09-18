@@ -62,6 +62,11 @@ const HEADER = `# Trailstone decision ledger. One entry per decision: what was d
 // stderr ignored: every caller already treats a failure as "no answer", and a raw git error
 // leaking to a user's terminal (running outside a repo, say) reads as a crash in trailstone.
 const git = (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+// Repo-relative paths are ALWAYS forward-slashed, because that is what git emits
+// (`ls-files`, `rev-parse --show-toplevel`) and what scopes in the ledger are written with.
+// node's relative() returns backslashes on Windows, so without this a scope of "src/auth/"
+// silently matched nothing there: the hook surfaced no decisions and said nothing about it.
+const toPosix = (p) => p.replace(/\\/g, "/");
 export function root(cwd = process.cwd()) {
   try { return git(["rev-parse", "--show-toplevel"], cwd); } catch { return null; }
 }
@@ -304,7 +309,7 @@ async function hook() {
   if (!r) process.exit(0); // not a git repo → nothing to say, and never a blocked prompt
   const rows = load(r);
   if (!rows) process.exit(0); // repo not opted in (no .trailstone/decisions.yml) → silent
-  const rel = (p) => (isAbsolute(p) ? relative(r, p) : p);
+  const rel = (p) => toPosix(isAbsolute(p) ? relative(r, p) : p);
 
   if (event === "SessionStart") {
     const st = stale(r, rows), n = inForce(rows).length, p = proposed(rows).length;
@@ -512,7 +517,7 @@ export function validateScope(claimed, touched, text) {
 async function capture(r, rows, transcriptPath) {
   const turn = lastTurn(transcriptPath);
   if (!turn) return;
-  const touched = (turn.files || []).map((f) => (isAbsolute(f) ? relative(r, f) : f)).filter((f) => f && !f.startsWith(".."));
+  const touched = (turn.files || []).map((f) => toPosix(isAbsolute(f) ? relative(r, f) : f)).filter((f) => f && !f.startsWith(".."));
   const gov = [...new Map(touched.flatMap((f) => governing(rows, f)).map((d) => [d.id, d])).values()];
   const { decisions, contradicted, failed, error, cost } = judge(turn, gov, touched);
   if (failed) return logCapture("FAIL", `${basename(r)} ${error}`);
@@ -658,7 +663,7 @@ async function main(argv) {
     default: console.log(readFileSync(SELF, "utf8").split("\n").slice(1, 30).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
   }
 }
-const rel = (r, p) => (isAbsolute(p) ? relative(r, p) : p);
+const rel = (r, p) => toPosix(isAbsolute(p) ? relative(r, p) : p);
 
 // The guard, as a function so the selfcheck can fire the logging path without a subprocess.
 function guard(r) { const st = stale(r, load(r) || []); logFires(r, st, "guard"); return st; }
@@ -1007,6 +1012,9 @@ function selfcheck() {
   const old = append(dir, { id: "d_old", at: "2020-01-02T00:00:00Z", by: "t", decision: "sessions use JWT, not cookies", scope: ["src/auth/**"] });
   const ok = (c, m) => { if (!c) throw new Error("selfcheck FAIL: " + m); };
   ok(governing(load(dir), "src/auth/jwt.ts").length === 1 && governing(load(dir), "src/other.ts").length === 0, "glob governance");
+  // Windows: relative() yields "src\\auth\\jwt.ts", which matches no forward-slash scope.
+  ok(rel(dir, join(dir, "src", "auth", "jwt.ts")) === "src/auth/jwt.ts", `repo-relative paths are forward-slashed (got: ${rel(dir, join(dir, "src", "auth", "jwt.ts"))})`);
+  ok(governing(load(dir), rel(dir, join(dir, "src", "auth", "jwt.ts"))).length === 1, "an ABSOLUTE path resolves to a governed file (the hook path)");
   ok(stale(dir).length === 0, "no reversal → nothing stale");
   append(dir, { id: "d_new", at: "2021-01-01T00:00:00Z", by: "t", decision: "sessions use cookies, not JWT", scope: [], supersedes: old.id });
   let st = stale(dir);
@@ -1093,7 +1101,8 @@ function selfcheck() {
     ok(out.status === 1, "doctor exits 1 when the cwd is not a repo");
     ok(out.stdout.includes(basename(dir)), `doctor names the repo one level down (got: ${out.stdout.trim()})`);
     const inside = spawnSync(process.execPath, [SELF, "doctor"], { cwd: dir, encoding: "utf8" });
-    ok(inside.stdout.includes("repo " + realpathSync(dir)), "doctor reports the repo it is in");
+    const norm = (x) => toPosix(x).toLowerCase();
+    ok(norm(inside.stdout).includes("repo " + norm(realpathSync(dir))), `doctor reports the repo it is in (got: ${inside.stdout.split("\n")[0]})`);
   }
   { // mcp: a real JSON-RPC handshake. Subprocess, because mcp() owns stdin. stdout must
     // carry the protocol and NOTHING else — one stray console.log breaks every client.

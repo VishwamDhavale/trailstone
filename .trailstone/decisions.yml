@@ -59,3 +59,10 @@
     - trailstone.mjs
     - package.json
     - .github/workflows/ci.yml
+- id: d_d1f2a3de
+  at: 2026-09-18T13:10:21.443Z
+  by: vishwamdhavale
+  decision: Repo-relative paths are always forward-slashed (toPosix), matching what git emits and what ledger scopes are written with.
+  why: "On Windows node's relative() returns backslashes, so the hook computed src\\auth\\session.js and matched no forward-slash scope: it surfaced nothing and said nothing — a silent failure on a whole platform. stale() was unaffected because it reads git ls-files directly, which is why only one selfcheck assertion caught it. Found by the 3-OS CI matrix on the first push."
+  scope:
+    - trailstone.mjs
