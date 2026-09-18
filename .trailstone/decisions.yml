@@ -82,3 +82,11 @@
     - LICENSE
     - package.json
     - CONTRIBUTING.md
+- id: d_47c47993
+  at: 2026-09-18T17:36:24.747Z
+  by: vishwamdhavale
+  decision: Tag a release from the exact commit being published, at publish time — never tag ahead of a release.
+  why: v0.1.0 was tagged on the first commit but npm 0.1.0 was published four commits later, so 'git checkout v0.1.0' and 'npm i trailstone@0.1.0' gave different bytes and the published artifact was not reproducible from the repo. The tag has been moved to the commit npm actually shipped.
+  scope:
+    - package.json
+    - CHANGELOG.md

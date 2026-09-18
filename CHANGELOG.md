@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 — Apache-2.0
+
+**Fixed**
+
+- `doctor` reported *"only 0/4 hooks installed"* while all four were live. `install`
+  started quoting the script path, and doctor's regex could not match across the closing
+  quote — a false "not watching" in the one command whose whole job is answering that.
+  Hooks are now counted structurally, and the selfcheck asserts doctor sees what install
+  wrote.
+
+**Changed**
+
+- Licence is **Apache-2.0** (0.1.0 remains available under MIT). Equally permissive, plus
+  an express patent grant and, via section 5, inbound contribution terms with no CLA.
+
 ## 0.1.0 — published to npm 2026-09-18 (MIT)
 
 First release. The whole loop: record a decision with the files it governs, surface it to
