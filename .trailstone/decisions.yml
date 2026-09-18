@@ -118,3 +118,11 @@
   why: Outside a repo is exactly where a fresh npm i -g is first run, and every command including --help answered 'not a git repo' with no guidance — the worst possible first impression for a tool whose whole pitch is legibility.
   scope:
     - trailstone.mjs
+- id: d_3c2caad8
+  at: 2026-09-18T19:33:27.144Z
+  by: vishwamdhavale
+  decision: install announces what it could not wire when run outside a repo, and the README puts 'cd your-repo' first
+  why: Following the README literally left a user with the advisory half and no pre-push guard — enforcement silently absent while everything looked installed. Silent loss of the gate is the worst failure this tool can have after a false flag.
+  scope:
+    - trailstone.mjs
+    - README.md

@@ -56,10 +56,17 @@ alarm you'll learn to ignore.
 ## Install
 
 ```bash
-npm i -g trailstone      # or: npx trailstone <command>
-trailstone install       # wires the Claude Code hooks + this repo's pre-push
-cd your-repo && trailstone init --goal "what this project is" && git add .trailstone && git commit -m "trailstone: ledger"
+npm i -g trailstone                 # or use npx trailstone <command> everywhere below
+cd your-repo                        # install must run INSIDE the repo
+trailstone install                  # Claude Code hooks (global) + this repo's pre-push guard + AGENTS.md
+trailstone init --goal "what this project is"
+git add .trailstone AGENTS.md && git commit -m "trailstone: ledger"
+trailstone doctor                   # confirms it is actually watching
 ```
+
+**Run `install` from inside the repo.** Outside one it can only write the global Claude Code
+hooks — you would get the warnings but *not* the pre-push guard that enforces them. It now
+says so when that happens, and `doctor` tells you either way.
 
 A repo without `.trailstone/decisions.yml` is silent — every hook exits immediately, so installing
 globally costs nothing on repos that never opted in.

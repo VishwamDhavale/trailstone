@@ -1053,6 +1053,14 @@ function install(f = {}) {
     else { mkdirSync(dirname(pp), { recursive: true }); writeFileSync(pp, `#!/bin/sh\nexec node "${SELF_CMD}" stale\n`); chmodSync(pp, 0o755); console.log(`pre-push → ${pp}`); }
     if (f["no-rules"]) console.log("skipped the agent rules file (--no-rules)");
     else writeRules(r);
+  } else {
+    // Run outside a repo, install used to write the hooks and silently skip the pre-push
+    // guard — leaving the advisory half working and the ENFORCING half absent, with nothing
+    // said. Enforcement is the part that is not optional, so say it loudly.
+    console.log(`\nNOT in a git repository (${process.cwd()}), so two things were SKIPPED:`);
+    console.log("  - the pre-push guard — the part that actually BLOCKS a stale push");
+    console.log("  - AGENTS.md — how non-Claude-Code agents learn to ask");
+    console.log("Run `trailstone install` again from inside your repo to get both.");
   }
   console.log("Per repo: `init`, then commit .trailstone/decisions.yml. Repos without it stay silent.");
   console.log("Claude Code gets the warning pushed before each edit (hooks). Other harnesses read AGENTS.md and must ask — commit it so they do.");
@@ -1234,6 +1242,17 @@ function selfcheck() {
   {
     const pkg = JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8"));
     ok(VERSION === pkg.version, `VERSION (${VERSION}) matches package.json (${pkg.version})`);
+  }
+
+  // `install` outside a repo writes the hooks but CANNOT write the pre-push guard. It used to
+  // skip it silently, leaving enforcement absent while looking installed — the README even
+  // told people to run it in that order.
+  {
+    const dir = join(tmpdir(), `trailstone-inst-${Date.now()}`); mkdirSync(dir, { recursive: true });
+    const home = join(dir, "home"); mkdirSync(home, { recursive: true });
+    const p = spawnSync(process.execPath, [SELF, "install"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } });
+    ok(/SKIPPED/.test(p.stdout) && /pre-push/.test(p.stdout), "install outside a repo SAYS it skipped the pre-push guard");
+    rmSync(dir, { recursive: true, force: true });
   }
 
   // Help and version must answer OUTSIDE a git repo — that is where a new install is first run.
