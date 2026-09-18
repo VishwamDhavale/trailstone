@@ -181,11 +181,18 @@ servers with an arbitrary working directory. A terminal agent already sitting in
 can leave it out. Leave it out and the server still starts — the first tool call then tells
 the agent to pass its project path as the `repo` argument, which agents do recover from.
 
-> **Claude Desktop: add this through the app, not by editing the file.** Claude Desktop keeps
-> its MCP config in memory and rewrites `claude_desktop_config.json` from that copy every time
-> it starts — so a hand-edit is silently reverted on the next launch, whether you made it with
-> the app running or closed. Use **Settings → Developer → Edit Config** (or Connectors) inside
-> the app. Cursor and Codex read their config files normally and can be edited by hand.
+> **Claude Desktop: quit it before you edit the file.** Claude Desktop holds its MCP config in
+> memory and writes `claude_desktop_config.json` back **on quit**, so an edit made while it is
+> running is silently reverted when you close it — the app restarts looking perfectly configured,
+> pointed wherever it was before. Quit it fully, then edit, then start it: that survives. (Its
+> **Settings → Local MCP servers → Edit config** button just reveals the file, and on Linux may
+> only open the folder.) Cursor and Codex read their config files normally and can be edited any
+> time.
+>
+> On Claude Desktop, consider leaving `--repo` **out**. It has no notion of a "current project",
+> so a pinned repo means every question is answered from that one repo without ever saying so.
+> With no `--repo` the first call asks the agent for the project path, and the repo is then
+> explicit in the conversation.
 
 **The honest limit: both of these are _pull_, not _push_.** The agent has to ask. Only
 Claude Code gets the warning injected *before* the edit without being asked — and that is
