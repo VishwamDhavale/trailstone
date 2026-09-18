@@ -1,0 +1,14 @@
+{
+  "name": "trailstone",
+  "version": "0.1.0",
+  "description": "A decision ledger that lives in your repo. When a decision is reversed, it names exactly which files are now suspect — at edit time, and at the push.",
+  "keywords": ["adr", "decisions", "claude-code", "ai-agents", "git-hooks", "architecture-decision-record"],
+  "license": "MIT",
+  "type": "module",
+  "bin": { "trailstone": "trailstone.mjs" },
+  "main": "trailstone.mjs",
+  "files": ["trailstone.mjs", "skills", "action.yml", "README.md", "LICENSE"],
+  "engines": { "node": ">=22.5" },
+  "scripts": { "test": "node trailstone.mjs --selfcheck", "demo": "node trailstone.mjs demo" },
+  "repository": { "type": "git", "url": "git+https://github.com/vishwamdhavale/trailstone.git" }
+}

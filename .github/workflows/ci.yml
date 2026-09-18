@@ -1,0 +1,13 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: node trailstone.mjs --selfcheck
+      - run: node trailstone.mjs demo
+      - run: node trailstone.mjs stale   # this repo's own ledger gates this repo

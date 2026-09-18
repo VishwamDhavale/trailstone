@@ -1,0 +1,10 @@
+name: "trailstone staleness gate"
+description: "Fail the check when a file in this PR rests on a decision that was later reversed."
+branding: { icon: "git-branch", color: "orange" }
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      # `stale` compares each file's last commit against the reversal that governs it, so the
+      # full history has to be here: set `fetch-depth: 0` on your checkout step.
+      run: node "${{ github.action_path }}/trailstone.mjs" stale

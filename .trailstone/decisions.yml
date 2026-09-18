@@ -1,0 +1,23 @@
+# Trailstone decision ledger. One entry per decision: what was decided, why, and the
+# paths it governs. Decisions are immutable — reverse one with a new entry carrying
+# `supersedes: <id>`. Editing this file in a PR IS the review.
+- kind: goal
+  id: g_f418f51a
+  at: 2026-09-06T18:18:33.516Z
+  by: vishwamdhavale
+  decision: "A decision ledger that lives in your repo: one stdlib script, one YAML file, no server. It surfaces the decisions governing the file in hand and blocks work that rests on a reversed one."
+- id: d_8c11f040
+  at: 2026-09-06T18:18:33.604Z
+  by: vishwamdhavale
+  decision: The ledger is a YAML file in the repo (.trailstone/decisions.yml), not a hosted database
+  why: git already gives provenance, membership, ratification and audit; a hosted ledger blocks the team case it is meant to serve
+  scope:
+    - trailstone.mjs
+- id: d_756ad0cd
+  at: 2026-09-09T15:07:11.755Z
+  by: vishwamdhavale
+  decision: decide/reverse print blast radius (files the scope covers) at record time, and the README states a flag means 'governed by' not 'broken' and that git revert fires nothing
+  why: Real reversal on a directory scope flags every file under it; measured 1 of 9 flagged files actually needed rework on real agent work (8 held). Showing the file count at decide time lets the user narrow scope before the noisy reversal; honest README wording prevents the 'exactly which is broken' overclaim that gets a tool uninstalled after the first noisy flag.
+  scope:
+    - trailstone.mjs
+    - README.md
