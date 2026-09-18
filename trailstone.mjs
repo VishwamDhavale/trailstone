@@ -1101,8 +1101,12 @@ function selfcheck() {
     ok(out.status === 1, "doctor exits 1 when the cwd is not a repo");
     ok(out.stdout.includes(basename(dir)), `doctor names the repo one level down (got: ${out.stdout.trim()})`);
     const inside = spawnSync(process.execPath, [SELF, "doctor"], { cwd: dir, encoding: "utf8" });
+    // Windows hands back an 8.3 short path from tmpdir() ("C:\\Users\\RUNNER~1\\...") while git
+    // resolves the long one; realpathSync.native canonicalises it. Case-insensitive too.
     const norm = (x) => toPosix(x).toLowerCase();
-    ok(norm(inside.stdout).includes("repo " + norm(realpathSync(dir))), `doctor reports the repo it is in (got: ${inside.stdout.split("\n")[0]})`);
+    const want = norm(realpathSync.native ? realpathSync.native(dir) : realpathSync(dir));
+    const got = (inside.stdout.split("\n").find((l) => l.includes("repo ")) || inside.stdout.split("\n")[0] || "").trim();
+    ok(norm(inside.stdout).includes("repo " + want), `doctor reports the repo it is in (want "${want}", got "${got}")`);
   }
   { // mcp: a real JSON-RPC handshake. Subprocess, because mcp() owns stdin. stdout must
     // carry the protocol and NOTHING else — one stray console.log breaks every client.
