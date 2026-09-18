@@ -171,7 +171,14 @@ dependencies, nothing to install beyond this script.
 
 `--repo` (or the `TRAILSTONE_REPO` env var) matters for desktop clients, which launch MCP
 servers with an arbitrary working directory. A terminal agent already sitting in the repo
-can leave it out.
+can leave it out. Leave it out and the server still starts — the first tool call then tells
+the agent to pass its project path as the `repo` argument, which agents do recover from.
+
+> **Claude Desktop: add this through the app, not by editing the file.** Claude Desktop keeps
+> its MCP config in memory and rewrites `claude_desktop_config.json` from that copy every time
+> it starts — so a hand-edit is silently reverted on the next launch, whether you made it with
+> the app running or closed. Use **Settings → Developer → Edit Config** (or Connectors) inside
+> the app. Cursor and Codex read their config files normally and can be edited by hand.
 
 **The honest limit: both of these are _pull_, not _push_.** The agent has to ask. Only
 Claude Code gets the warning injected *before* the edit without being asked — and that is
