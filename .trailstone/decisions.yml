@@ -90,3 +90,17 @@
   scope:
     - package.json
     - CHANGELOG.md
+- id: d_fc1430d2
+  at: 2026-09-18T17:55:24.932Z
+  by: vishwamdhavale
+  decision: stale() builds last-commit times with ONE git log for the repo, not git log -1 per file; git calls carry an explicit maxBuffer.
+  why: Per-file spawning took 11.3s on a 2000-file scope inside a hook that runs on every prompt — a direct breach of the never-slow-a-prompt contract. One log scan is 0.13s with identical results. Separately, git() had no maxBuffer, so ls-files on a ~30k-file repo blew node's 1MB default, threw, was caught, and staleness silently stopped firing.
+  scope:
+    - trailstone.mjs
+- id: d_3e490159
+  at: 2026-09-18T17:55:25.043Z
+  by: vishwamdhavale
+  decision: Ship an uninstall command that removes the hooks and pre-push but never the ledger or AGENTS.md.
+  why: The tool writes into ~/.claude/settings.json and .git/hooks; without a way out people must hand-edit JSON to remove it. Decisions and repo content are the user's, so uninstall does not touch them.
+  scope:
+    - trailstone.mjs

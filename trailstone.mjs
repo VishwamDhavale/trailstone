@@ -28,6 +28,7 @@
 //   demo [--keep] the whole loop on a throwaway repo, in ten seconds
 //   report [--anon|--json] a paste-ready summary: ledger, fires, precision, current stale
 //   install        wire the hooks + pre-push (+ AGENTS.md rules for non-hook harnesses)
+//   uninstall      remove that wiring again (never touches your ledger)
 //
 // Row shapes (kind defaults to "decision"):
 //   {id, at, by, decision, why?, scope:[glob], supersedes?, status?:"proposed"|"rejected"}
@@ -61,7 +62,7 @@ const HEADER = `# Trailstone decision ledger. One entry per decision: what was d
 // ── git ───────────────────────────────────────────────────────────────────────
 // stderr ignored: every caller already treats a failure as "no answer", and a raw git error
 // leaking to a user's terminal (running outside a repo, say) reads as a crash in trailstone.
-const git = (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+const git = (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8", timeout: 20000, maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }).trim();
 // Repo-relative paths are ALWAYS forward-slashed, because that is what git emits
 // (`ls-files`, `rev-parse --show-toplevel`) and what scopes in the ledger are written with.
 // node's relative() returns backslashes on Windows, so without this a scope of "src/auth/"
@@ -75,6 +76,24 @@ function who(cwd) {
 }
 function lastCommitEpoch(cwd, file) {
   try { const s = git(["log", "-1", "--format=%ct", "--", file], cwd); return s ? Number(s) : null; } catch { return null; }
+}
+// Last-commit time for EVERY path, in one git process. The per-file call above meant one
+// spawn per file in scope: 2000 files took 11s — inside a hook that runs on every prompt,
+// which is exactly the "never slow a prompt" contract this tool lives under. `git log` is
+// newest-first, so the first time a path appears is its last commit.
+// ponytail: --name-only omits merge commits' files; a path touched only by a merge reads as
+// unknown and is skipped (missed flag, never a false one). Widen with -m if that ever bites.
+function lastCommitMap(cwd) {
+  const m = new Map();
+  try {
+    let at = null;
+    for (const line of git(["log", "--format=%ct", "--name-only"], cwd).split("\n")) {
+      if (!line) continue;
+      if (/^\d+$/.test(line)) { at = Number(line); continue; }
+      if (at != null && !m.has(line)) m.set(line, at);
+    }
+  } catch {}
+  return m;
 }
 function dirtyFiles(cwd) {
   try { // untrimmed: porcelain lines start with a status column that may be a space
@@ -186,6 +205,7 @@ export function stale(r, rows = load(r)) {
   if (!reversals.length) return [];
   const validations = rows.filter((x) => x.kind === "validation");
   const files = trackedFiles(r), dirty = dirtyFiles(r), out = new Map();
+  const commitAt = lastCommitMap(r); // one git process, not one per file
   const epoch = (iso) => Math.floor(Date.parse(iso) / 1000);
   for (const d of reversals) {
     const old = byId.get(d.supersedes);
@@ -194,7 +214,7 @@ export function stale(r, rows = load(r)) {
     if (!governed.length || !Number.isFinite(at)) continue;
     for (const f of files) {
       if (!scopeHits(governed, f) || dirty.has(f)) continue;
-      const last = lastCommitEpoch(r, f);
+      const last = commitAt.has(f) ? commitAt.get(f) : null;
       if (last == null || last >= at) continue; // touched since → addressed
       const ok = validations.some((v) => (v.decisionId === d.id || v.decisionId === old.id) && epoch(v.at) >= at && (!v.scope?.length || scopeHits(v.scope, f)));
       if (ok) continue;
@@ -659,6 +679,7 @@ async function main(argv) {
     case "hook": return hook();
     case "mcp": return mcp(f);
     case "install": return install(f);
+    case "uninstall": return uninstall();
     case "--selfcheck": return selfcheck();
     default: console.log(readFileSync(SELF, "utf8").split("\n").slice(1, 30).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
   }
@@ -978,6 +999,32 @@ function writeRules(r) {
   }
 }
 
+// A tool that writes into ~/.claude/settings.json and .git/hooks must have a way out, or
+// people are stuck hand-editing JSON to get rid of it. Removes only the WIRING — never the
+// ledger, never AGENTS.md: those are the user's decisions and their repo's content.
+function uninstall() {
+  const st = join(homedir(), ".claude", "settings.json"), s = readJson(st, {});
+  let removed = 0;
+  for (const ev of Object.keys(s.hooks || {})) {
+    s.hooks[ev] = (s.hooks[ev] || []).map((g) => {
+      const keep = (g.hooks || []).filter((h) => !(h.command || "").includes(basename(SELF)));
+      removed += (g.hooks || []).length - keep.length;
+      return { ...g, hooks: keep };
+    }).filter((g) => (g.hooks || []).length);
+    if (!s.hooks[ev].length) delete s.hooks[ev];
+  }
+  try { writeFileSync(st, JSON.stringify(s, null, 2)); console.log(`removed ${removed} hook${removed === 1 ? "" : "s"} from ${st}`); }
+  catch { console.log(`could not write ${st} — remove the ${basename(SELF)} entries by hand`); }
+
+  const r = root();
+  if (r) {
+    const pp = join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push");
+    if (existsSync(pp) && readFileSync(pp, "utf8").includes(basename(SELF))) { rmSync(pp); console.log(`removed ${pp}`); }
+    else if (existsSync(pp)) console.log(`${pp} is not ours — left alone`);
+  }
+  console.log("Left alone on purpose: .trailstone/decisions.yml (your decisions) and any AGENTS.md block (your repo's content). Delete those yourself if you want them gone.");
+}
+
 function install(f = {}) {
   const st = join(homedir(), ".claude", "settings.json"), s = readJson(st, {});
   s.hooks = s.hooks || {};
@@ -1161,6 +1208,13 @@ function selfcheck() {
     // in the one command whose entire job is answering "is it watching?".
     const doc = spawnSync(process.execPath, [SELF, "doctor"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } });
     ok(/all 4 Claude Code hooks installed/.test(doc.stdout), `doctor sees the hooks install just wrote (got: ${(doc.stdout.split("\n").find((l) => l.includes("hook")) || "").trim()})`);
+    // …and there must be a way out again. A tool that edits settings.json without an
+    // uninstall leaves people hand-editing JSON to be rid of it.
+    spawnSync(process.execPath, [SELF, "uninstall"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } });
+    const after = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+    const left = Object.values(after.hooks || {}).flat().flatMap((g) => g.hooks || []).filter((k) => (k.command || "").includes(basename(SELF)));
+    ok(left.length === 0, `uninstall removes every hook it wrote (${left.length} left)`);
+    ok(existsSync(join(dir, LEDGER)), "uninstall does NOT delete the ledger");
   }
   console.log("trailstone selfcheck: OK");
 }

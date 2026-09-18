@@ -4,11 +4,21 @@
 
 **Fixed**
 
+- **`stale` was O(files) git processes.** It ran `git log -1` once per file in scope — 2000
+  files took **11.3 seconds**, inside a hook that runs on every prompt. Now one `git log`
+  builds the whole map: **0.13 seconds**, same results.
+- **`git` calls had no `maxBuffer`**, so on a repo of roughly 30k+ files `git ls-files`
+  exceeded node's 1 MB default, threw, was caught, and staleness silently stopped firing.
 - `doctor` reported *"only 0/4 hooks installed"* while all four were live. `install`
   started quoting the script path, and doctor's regex could not match across the closing
   quote — a false "not watching" in the one command whose whole job is answering that.
   Hooks are now counted structurally, and the selfcheck asserts doctor sees what install
   wrote.
+
+**Added**
+
+- `uninstall` — removes the hooks and the pre-push guard it wrote. It deliberately leaves
+  your ledger and any `AGENTS.md` block alone; those are your decisions and your repo.
 
 **Changed**
 

@@ -199,6 +199,7 @@ doctor                        is Trailstone watching this repo? exit 1 if instal
 capture-health                the last 5 judge runs; exit 1 if the last one failed
 hook                          Claude Code hook dispatch (stdin JSON) — not for humans
 install                       wire the hooks + pre-push
+uninstall                     remove that wiring (leaves your ledger alone)
 ```
 
 Real example:
