@@ -73,3 +73,12 @@
   why: install began quoting the script path, so the old /trailstone.mjs hook/ regex matched nothing and doctor reported 0/4 hooks while all four were live — a false 'not watching' in the one command whose job is answering that question. Found while migrating a real project. Selfcheck now asserts doctor sees what install wrote, and the assertion was verified to fail when the regex form is restored.
   scope:
     - trailstone.mjs
+- id: d_c904d456
+  at: 2026-09-18T17:19:34.097Z
+  by: vishwamdhavale
+  decision: Licence is Apache-2.0 from 0.2.0 on, not MIT (0.1.0 stays MIT for anyone who took it).
+  why: Apache-2.0 is equally permissive but adds an express patent grant and, via section 5, unambiguous inbound contribution terms — no CLA needed for a project that actively solicits PRs — and it clears corporate legal review faster. It does NOT protect the idea from competitors; no licence does. Switched while pre-public with zero external contributors, which is the cheapest moment it will ever be.
+  scope:
+    - LICENSE
+    - package.json
+    - CONTRIBUTING.md

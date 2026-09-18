@@ -133,4 +133,14 @@ happened — including "nothing broke" — is one of the most useful contributio
 
 ## Licence
 
-MIT. By contributing you agree your contribution is licensed under it.
+**Apache-2.0.** Contributions are licensed under it too — Apache-2.0 section 5 says any
+contribution you deliberately submit for inclusion is under the same terms, so there is no
+CLA to sign and nothing extra to agree to.
+
+Why Apache-2.0 rather than MIT: it carries an express patent grant and explicit inbound
+contribution terms, which is what companies' legal review looks for and what keeps
+contributor IP unambiguous. It is just as permissive as MIT — commercial use, proprietary
+forks, SaaS and redistribution are all fine.
+
+Version 0.1.0 was published under MIT and remains available under MIT; everything from
+0.2.0 on is Apache-2.0.

@@ -174,7 +174,7 @@ What holds, and what doesn't:
 
 ## Status
 
-v0.1, local-first, MIT-licensed. The mechanism is real and self-verifying; everything
+v0.1, local-first, Apache-2.0 licensed. The mechanism is real and self-verifying; everything
 above the local tool is a direction put out for validation, not a finished system.
 
 We are publishing the idea, not guarding it. The problem is real, the loop is small
