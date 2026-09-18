@@ -174,8 +174,11 @@ What holds, and what doesn't:
 
 ## Status
 
-v0.1, local-first, Apache-2.0 licensed. The mechanism is real and self-verifying; everything
-above the local tool is a direction put out for validation, not a finished system.
+v0.2, local-first, Apache-2.0 licensed. The mechanism is real and self-verifying — the
+selfcheck runs in CI on Linux, macOS and Windows across Node 20/22/24. Everything above
+the local tool is a direction put out for validation, not a finished system. What it has
+*not* had yet is strangers' repos: submodules, worktrees, shallow clones, monorepos. If
+it breaks on yours, that is the report we want most.
 
 We are publishing the idea, not guarding it. The problem is real, the loop is small
 enough to reason about, and the format is stable enough to build on. If it earns its

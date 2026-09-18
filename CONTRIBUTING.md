@@ -123,13 +123,13 @@ known cross-platform hazards are handled and asserted in `--selfcheck`:
 
 Status, honestly:
 
-- **Linux** — developed and tested here.
-- **macOS** — the POSIX assumptions are the same as Linux and the space-in-path case is
-  covered, but **we have not run it on a Mac.**
-- **Windows** — the known hazards above are fixed, but **we have not run it on Windows.**
+CI runs the full `--selfcheck` on **Linux, macOS and Windows** across **Node 20, 22 and 24** —
+nine jobs, every push. So the hazards above are checked by execution, not by reasoning.
 
-If you use macOS or Windows, running `node trailstone.mjs --selfcheck` and telling us what
-happened — including "nothing broke" — is one of the most useful contributions right now.
+What CI still cannot check is a **GUI client**: Cursor and Claude Desktop launch the MCP server
+themselves, from a working directory we do not control. If you use either on macOS or Windows,
+telling us what `trailstone doctor` says — including "nothing broke" — is one of the most useful
+contributions right now.
 
 ## Licence
 
