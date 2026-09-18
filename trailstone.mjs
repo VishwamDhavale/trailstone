@@ -20,11 +20,14 @@
 //                  Stop — which detaches a cheap haiku judge that appends what the turn
 //                  decided as `proposed`. On by default; TRAILSTONE_CAPTURE=0, or no `claude`
 //                  binary on PATH, turns it off.)
+//   mcp            an MCP server on stdio, so ANY MCP client (Claude Desktop, Cursor,
+//                  Codex, Windsurf) can read the ledger. Pull, not push: the agent has
+//                  to ask. Push (unasked, pre-edit) is Claude Code only — see `hook`.
 //   doctor         is Trailstone watching THIS directory? (exit 1 when it is installed but blind)
 //   capture-health the last 5 judge runs (exit 1 when the last one FAILed)
 //   demo [--keep] the whole loop on a throwaway repo, in ten seconds
 //   report [--anon|--json] a paste-ready summary: ledger, fires, precision, current stale
-//   install        wire the hooks + pre-push
+//   install        wire the hooks + pre-push (+ AGENTS.md rules for non-hook harnesses)
 //
 // Row shapes (kind defaults to "decision"):
 //   {id, at, by, decision, why?, scope:[glob], supersedes?, status?:"proposed"|"rejected"}
@@ -38,6 +41,11 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, chmodSync, rmSync, realpathSync, readdirSync } from "node:fs";
 import { join, dirname, relative, isAbsolute, matchesGlob, basename } from "node:path";
+// path.matchesGlob landed in node 20.17 / 22.5. Below that it is undefined, the try/catch
+// in matches() swallows the TypeError, and every glob scope silently governs NOTHING —
+// a precision tool failing quiet, which is the one failure we refuse. Detect it, and say so
+// loudly on the CLI. Hooks never speak: availability must fail open, correctness must not.
+const HAS_GLOB = typeof matchesGlob === "function";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -356,7 +364,9 @@ const captureLog = () => join(homedir(), ".trailstone", "capture.log");
 function logCapture(status, detail) {
   try { mkdirSync(dirname(captureLog()), { recursive: true }); appendFileSync(captureLog(), `${new Date().toISOString()} ${status} ${detail}\n`); } catch {}
 }
-const hasClaude = () => { try { execFileSync("sh", ["-c", "command -v claude"], { stdio: "ignore" }); return true; } catch { return false; } };
+// `sh -c command -v` does not exist on Windows, so this used to silently disable capture for
+// every Windows user. `where`/`which` are the portable pair, and need no shell.
+const hasClaude = () => { try { execFileSync(process.platform === "win32" ? "where" : "which", ["claude"], { stdio: "ignore" }); return true; } catch { return false; } };
 
 const PROMPT = (userAsk, assistant, governing, touched) =>
   `You extract COMMITTED DECISIONS from a coding-assistant turn, for a durable decision log,
@@ -522,6 +532,12 @@ async function capture(r, rows, transcriptPath) {
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 const SELF = fileURLToPath(import.meta.url);
+// Generated commands land in a shell: Claude Code's hook runner, and git's bash for the
+// pre-push hook (git-bash on Windows too). Two things break them, on every platform:
+// an unquoted path with a space ("/Users/My Name/…", "C:\\Users\\John Doe\\…"), and
+// Windows backslashes, which sh treats as escapes. Forward slashes work in node and in
+// git-bash on Windows, so normalise once and always quote at the call site.
+const SELF_CMD = SELF.replace(/\\/g, "/");
 function flags(argv) {
   const pos = [], f = {};
   for (let i = 0; i < argv.length; i++) argv[i].startsWith("--") ? (f[argv[i].slice(2)] = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true) : pos.push(argv[i]);
@@ -558,7 +574,10 @@ async function main(argv) {
   // user working in every repo on the machine. It happened (a session in a non-git directory,
   // 2026-09-06). `hook` handles "no repo" itself by exiting 0 silently.
   // demo builds its own repo; capture-health reads a log; install is machine-wide — none need a repo.
-  if (!r && !["--selfcheck", "install", "capture-health", "demo", "hook", "doctor"].includes(cmd)) { console.error("not a git repo"); process.exit(2); }
+  // `mcp` is exempt too: it resolves its own repo from --repo / TRAILSTONE_REPO, because
+  // desktop MCP clients launch a server with an arbitrary cwd. Exiting here broke all of them.
+  if (!r && !["--selfcheck", "install", "capture-health", "demo", "hook", "doctor", "mcp"].includes(cmd)) { console.error("not a git repo"); process.exit(2); }
+  if (!HAS_GLOB && cmd !== "hook") console.error(`WARNING: this node (${process.version}) has no path.matchesGlob — glob scopes like "src/**/*.ts" will match NOTHING and decisions using them will govern nothing. Upgrade to node 20.17+ or use plain paths/directories as scopes.`);
   switch (cmd) {
     case "init": {
       mkdirSync(join(r, ".trailstone"), { recursive: true });
@@ -633,7 +652,8 @@ async function main(argv) {
     }
     case "doctor": return doctor();
     case "hook": return hook();
-    case "install": return install();
+    case "mcp": return mcp(f);
+    case "install": return install(f);
     case "--selfcheck": return selfcheck();
     default: console.log(readFileSync(SELF, "utf8").split("\n").slice(1, 30).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
   }
@@ -790,22 +810,181 @@ function doctor() {
   console.log("\nTrailstone is watching this repo.");
 }
 
-function install() {
+// ── MCP, over stdio ───────────────────────────────────────────────────────────
+// PULL for every MCP-capable client (Claude Desktop, Cursor, Codex, Windsurf…): one
+// implementation instead of a shim per editor. Hand-rolled JSON-RPC on purpose — MCP
+// stdio is just newline-delimited JSON on stdin/stdout, and taking the SDK as a
+// dependency would break `npx trailstone` on a bare machine (zero-deps is an invariant).
+// stdout carries the protocol and NOTHING else; diagnostics go to stderr.
+// Note this is strictly weaker than the Claude Code hooks: the agent must CHOOSE to ask.
+const MCP_TOOLS = [
+  { name: "list_decisions", description: "The decisions in force in this repo's ledger: what was decided, why, and which files each governs.", inputSchema: { type: "object", properties: { repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } } } },
+  { name: "governing", description: "Which decisions bind a given file. Call this BEFORE editing a file, and honor what it returns.", inputSchema: { type: "object", properties: { file: { type: "string", description: "Path to the file (absolute, or relative to the repo root)." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["file"] } },
+  { name: "stale", description: "Files last committed BEFORE a decision governing them was reversed: they rest on a decision that has since changed and must be re-checked before you build on them.", inputSchema: { type: "object", properties: { repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } } } },
+  { name: "decide", description: "Record a real choice that forecloses an alternative. Phrase it as 'X, not Y' so a later reversal reads as a diff. Scope it as narrowly as the change really is.", inputSchema: { type: "object", properties: { decision: { type: "string" }, why: { type: "string" }, scope: { type: "array", items: { type: "string" }, description: "Paths, directories or globs this decision governs." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision"] } },
+  { name: "reverse", description: "Record that a decision has changed. Flags every tracked file that still rests on the old one.", inputSchema: { type: "object", properties: { decision_ref: { type: "string", description: "The id of the decision being reversed, or a unique phrase from its text." }, decision: { type: "string", description: "The NEW decision." }, why: { type: "string" }, scope: { type: "array", items: { type: "string" } }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision_ref", "decision"] } },
+  { name: "validate", description: "Record that you re-checked a flagged file against the decision and it still holds (this clears the flag). Set wrong=true when the file never rested on that decision at all.", inputSchema: { type: "object", properties: { decision_ref: { type: "string" }, file: { type: "string" }, wrong: { type: "boolean" }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision_ref", "file"] } },
+];
+const MCP_INSTRUCTIONS = `Trailstone is this repo's decision ledger (.trailstone/decisions.yml).
+
+Before you edit a file, call \`governing\` on it and honor any decision it returns. If what
+you are about to do contradicts one, say which decision first and ask — changing a decision
+is expected, departing from it silently is not.
+
+Call \`stale\` before you start: it lists work resting on a decision that has since been
+reversed. Re-check those files against the current decision before building on them, then
+either redo them (a commit clears the flag) or record \`validate\` if they still hold.
+
+When you make a real choice that forecloses an alternative, record it with \`decide\`.
+
+If a tool replies that there is no git repository, pass your project's absolute path as the
+\`repo\` argument — this server is often launched from a different directory than your
+workspace, so it cannot always work out where your project is.`;
+
+// --repo / TRAILSTONE_REPO matter: desktop MCP clients (Claude Desktop, Cursor) launch a
+// server with an arbitrary cwd, so cwd alone would find no repo and every tool would say
+// "not inside a git repository". Terminal agents can rely on cwd; desktop ones must say.
+function mcp(f = {}) {
+  const where = f.repo || process.env.TRAILSTONE_REPO || process.cwd();
+  const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+  const ok = (id, result) => { if (id !== undefined && id !== null) send({ jsonrpc: "2.0", id, result }); };
+  const fail = (id, message) => { if (id !== undefined && id !== null) send({ jsonrpc: "2.0", id, error: { code: -32603, message } }); };
+  const say = (id, t) => ok(id, { content: [{ type: "text", text: t || "(nothing)" }] });
+
+  const call = (name, a = {}) => {
+    // Resolve the repo PER CALL. Editors do not agree on cwd: Cursor launches the server
+    // from the home workspace rather than the open folder (observed), and desktop clients
+    // use an arbitrary directory — cwd alone reported "no repo" while sitting in a real
+    // project. Order: explicit `repo` arg > an absolute file path > --repo/env > cwd.
+    const hint = a.repo || (a.file && isAbsolute(a.file) ? dirname(a.file) : null) || where;
+    const r = root(hint);
+    if (!r) return `No git repository at ${hint}. Pass your project's absolute path as the "repo" argument (e.g. repo: "/home/you/project") — editors launch this server from an arbitrary directory, so it cannot always tell where your project is. Alternatively set --repo or TRAILSTONE_REPO in this server's configuration.`;
+    const rows = load(r);
+    if (!rows && name !== "decide") return `No ${LEDGER} in this repo yet — run \`trailstone init\` first.`;
+    const all = (rows || []).filter((x) => (x.kind ?? "decision") === "decision");
+    const live = inForce(rows || []).filter((x) => (x.kind ?? "decision") === "decision");
+    switch (name) {
+      case "list_decisions":
+        return live.length ? live.map((d) => `[${d.id}] ${d.decision}${d.why ? `\n  why: ${d.why}` : ""}${d.scope?.length ? `\n  scope: ${d.scope.join(", ")}` : ""}`).join("\n") : "No decisions in force.";
+      case "governing": {
+        if (!a.file) return "file is required.";
+        const g = governing(rows || [], rel(r, a.file));
+        return g.length ? `Decisions governing ${a.file} — honor these:\n` + g.map((d) => `[${d.id}] ${d.decision}${d.why ? ` (why: ${d.why})` : ""}`).join("\n") : `No decision governs ${a.file}.`;
+      }
+      case "stale": { const st = stale(r, rows || []); logFires(r, st, "mcp"); return st.length ? renderStale(st) : "Clean — nothing rests on a reversed decision."; }
+      case "decide": {
+        if (!a.decision) return "decision is required.";
+        if (!load(r)) { mkdirSync(join(r, ".trailstone"), { recursive: true }); writeFileSync(join(r, LEDGER), HEADER); }
+        const scope = Array.isArray(a.scope) ? a.scope : [];
+        const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision, why: a.why || "", scope });
+        if (!scope.length) return `Recorded ${row.id}, but with NO scope it governs nothing and a reversal will flag nothing. Add scope to make it enforceable.`;
+        const n = trackedFiles(r).filter((x) => scopeHits(scope, x)).length;
+        return `Recorded ${row.id}. Commit ${LEDGER} to make it bind for everyone. Scope covers ${n} tracked file(s) — a reversal will flag all ${n} to re-check.`;
+      }
+      case "reverse": {
+        if (!a.decision_ref || !a.decision) return "decision_ref and decision are required.";
+        const res = resolveRef(a.decision_ref, live);
+        if (res.error) return res.error;
+        const old = all.find((x) => x.id === res.id);
+        const scope = (Array.isArray(a.scope) && a.scope.length) ? a.scope : (old.scope || []);
+        const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision, why: a.why || "", scope, supersedes: res.id });
+        const st = stale(r).filter((s) => s.replacedById === row.id);
+        return `Recorded ${row.id} (supersedes ${res.id}).` + (st.length ? `\nNow stale — re-check these before building on them:\n` + st.map((s) => `  ${s.file}`).join("\n") : "\nNothing became stale.");
+      }
+      case "validate": {
+        if (!a.decision_ref || !a.file) return "decision_ref and file are required.";
+        const res = resolveRef(a.decision_ref, all);
+        if (res.error) return res.error;
+        const row = append(r, { kind: "validation", id: newId("v"), at: new Date().toISOString(), by: who(r), decisionId: res.id, scope: [rel(r, a.file)], ...(a.wrong ? { wrong: true } : {}) });
+        return `${row.id}: recorded that ${a.file} was re-checked against ${res.id} — ${a.wrong ? "FALSE POSITIVE (it never rested on that decision)" : "it still holds"}.`;
+      }
+      default: return `Unknown tool ${name}.`;
+    }
+  };
+
+  let buf = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      if (!line) continue;
+      let m; try { m = JSON.parse(line); } catch { continue; }
+      try {
+        if (m.method === "initialize") ok(m.id, { protocolVersion: m.params?.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "trailstone", version: VERSION }, instructions: MCP_INSTRUCTIONS });
+        else if (String(m.method || "").startsWith("notifications/")) { /* notifications get no reply */ }
+        else if (m.method === "ping") ok(m.id, {});
+        else if (m.method === "tools/list") ok(m.id, { tools: MCP_TOOLS });
+        else if (m.method === "tools/call") say(m.id, call(m.params?.name, m.params?.arguments || {}));
+        else fail(m.id, `unsupported method ${m.method}`);
+      } catch (e) { fail(m.id, String((e && e.message) || e)); }
+    }
+  });
+  process.stdin.on("end", () => process.exit(0));
+}
+
+// Portable agent rules, for every harness WITHOUT a hook API (Codex, Cursor, Claude
+// Desktop, …). Automatic pre-edit PUSH is Claude-Code-only; this is the universal
+// fallback: a static instruction file each of those reads at session start. Weaker than
+// a hook — the agent must obey rather than be interrupted — but it works everywhere.
+// ponytail: marker-delimited so it is idempotent and never clobbers a hand-written file.
+// No machine-specific paths inside: this file gets COMMITTED and cloned by other people.
+const RULES_MARK = "<!-- trailstone:rules -->";
+const rulesBlock = () => `${RULES_MARK}
+## Trailstone — the decisions that govern this repo
+
+This repo records its load-bearing decisions in \`.trailstone/decisions.yml\`.
+
+**Before you edit a file**, check what governs it — and honor it:
+
+\`\`\`
+trailstone governing <file>    # which decisions bind this file   (no install? use: npx trailstone governing <file>)
+trailstone stale               # files resting on a REVERSED decision — re-check these before building on them
+\`\`\`
+
+- If your change would contradict a decision in force, **say which decision first and
+  ask.** Changing a decision is fine and expected; departing from it silently is not.
+- When you make a real choice that forecloses an alternative, record it:
+  \`trailstone decide "X, not Y" --why "<reason>" --scope <paths>\`
+  Keep the scope as narrow as the change really is — a whole-directory scope becomes an
+  alarm everyone learns to ignore.
+<!-- /trailstone:rules -->`;
+
+// AGENTS.md is the cross-harness convention; Cursor gets its own rules file, but only
+// when .cursor/ already exists — we do not litter a repo with editors it does not use.
+function writeRules(r) {
+  const block = rulesBlock();
+  const p = join(r, "AGENTS.md");
+  let cur = ""; try { cur = readFileSync(p, "utf8"); } catch {}
+  if (cur.includes(RULES_MARK)) console.log(`AGENTS.md already carries the block — left alone`);
+  else { writeFileSync(p, cur ? cur.replace(/\s*$/, "") + "\n\n" + block + "\n" : block + "\n"); console.log(`${cur ? "appended to" : "wrote"} ${p}`); }
+  if (existsSync(join(r, ".cursor"))) {
+    const c = join(r, ".cursor", "rules", "trailstone.mdc");
+    if (existsSync(c)) console.log(`${c} exists — left alone`);
+    else { mkdirSync(dirname(c), { recursive: true }); writeFileSync(c, `---\nalwaysApply: true\n---\n\n${block}\n`); console.log(`wrote ${c} (Cursor)`); }
+  }
+}
+
+function install(f = {}) {
   const st = join(homedir(), ".claude", "settings.json"), s = readJson(st, {});
   s.hooks = s.hooks || {};
   for (const [ev, matcher] of [["SessionStart"], ["UserPromptSubmit"], ["PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"], ["Stop"]]) {
     s.hooks[ev] = s.hooks[ev] || [];
-    if (!s.hooks[ev].some((g) => (g.hooks || []).some((h) => (h.command || "").includes(basename(SELF))))) s.hooks[ev].push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `node ${SELF} hook` }] });
+    if (!s.hooks[ev].some((g) => (g.hooks || []).some((h) => (h.command || "").includes(basename(SELF))))) s.hooks[ev].push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `node "${SELF_CMD}" hook` }] });
   }
   mkdirSync(dirname(st), { recursive: true }); writeFileSync(st, JSON.stringify(s, null, 2));
   console.log(`hooks → ${st}`);
   const r = root();
   if (r) {
     const pp = join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push");
-    if (existsSync(pp)) console.log(`pre-push exists at ${pp} — add: node ${SELF} stale`);
-    else { mkdirSync(dirname(pp), { recursive: true }); writeFileSync(pp, `#!/bin/sh\nexec node "${SELF}" stale\n`); chmodSync(pp, 0o755); console.log(`pre-push → ${pp}`); }
+    if (existsSync(pp)) console.log(`pre-push exists at ${pp} — add: node "${SELF_CMD}" stale`);
+    else { mkdirSync(dirname(pp), { recursive: true }); writeFileSync(pp, `#!/bin/sh\nexec node "${SELF_CMD}" stale\n`); chmodSync(pp, 0o755); console.log(`pre-push → ${pp}`); }
+    if (f["no-rules"]) console.log("skipped the agent rules file (--no-rules)");
+    else writeRules(r);
   }
   console.log("Per repo: `init`, then commit .trailstone/decisions.yml. Repos without it stay silent.");
+  console.log("Claude Code gets the warning pushed before each edit (hooks). Other harnesses read AGENTS.md and must ask — commit it so they do.");
 }
 
 // The one runnable check: a throwaway repo, a decision, a reversal, the three clears.
@@ -915,6 +1094,48 @@ function selfcheck() {
     ok(out.stdout.includes(basename(dir)), `doctor names the repo one level down (got: ${out.stdout.trim()})`);
     const inside = spawnSync(process.execPath, [SELF, "doctor"], { cwd: dir, encoding: "utf8" });
     ok(inside.stdout.includes("repo " + realpathSync(dir)), "doctor reports the repo it is in");
+  }
+  { // mcp: a real JSON-RPC handshake. Subprocess, because mcp() owns stdin. stdout must
+    // carry the protocol and NOTHING else — one stray console.log breaks every client.
+    const req = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "governing", arguments: { file: "src/auth/jwt.ts" } } },
+    ].map((x) => JSON.stringify(x)).join("\n") + "\n";
+    const res = spawnSync(process.execPath, [SELF, "mcp"], { cwd: dir, input: req, encoding: "utf8" });
+    ok(res.status === 0, `mcp exits 0 (got ${res.status})`);
+    let msgs;
+    try { msgs = res.stdout.trim().split("\n").map((l) => JSON.parse(l)); }
+    catch { throw new Error("selfcheck FAIL: mcp wrote non-JSON to stdout:\n" + res.stdout); }
+    ok(msgs.length === 3, `mcp answers only the 3 requests, not the notification (got ${msgs.length})`);
+    ok(msgs[0].result?.serverInfo?.name === "trailstone", "mcp initialize returns serverInfo");
+    ok((msgs[1].result?.tools || []).some((t) => t.name === "governing"), "mcp tools/list advertises governing");
+    ok(typeof msgs[2].result?.content?.[0]?.text === "string", "mcp tools/call returns text content");
+    // Client profile: launched from a FOREIGN cwd. Cursor starts the server in the home
+    // workspace, not the folder you opened, so cwd alone found no repo on a real project.
+    // Both halves matter: the error must tell the agent what to do, and `repo` must work.
+    const far = spawnSync(process.execPath, [SELF, "mcp"], { cwd: tmpdir(), encoding: "utf8", input:
+      [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_decisions", arguments: {} } },
+       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_decisions", arguments: { repo: dir } } },
+      ].map((x) => JSON.stringify(x)).join("\n") + "\n" });
+    const fm = far.stdout.trim().split("\n").map((l) => JSON.parse(l));
+    ok(/repo/.test(fm[0].result.content[0].text), "mcp with no repo tells the agent to pass `repo`");
+    ok(!/No git repository/.test(fm[1].result.content[0].text), "mcp `repo` argument overrides a foreign cwd");
+  }
+  { // install: the commands it GENERATES run in a shell. An unquoted path with a space
+    // ("/Users/My Name/…") or a Windows backslash breaks all four hooks silently — the
+    // worst failure mode there is, because Trailstone then looks installed and says nothing.
+    const home = join(tmpdir(), `ts-home-${Date.now()}`); mkdirSync(home, { recursive: true });
+    const res = spawnSync(process.execPath, [SELF, "install", "--no-rules"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } });
+    ok(res.status === 0, `install exits 0 (got ${res.status})`);
+    const cfg = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+    const cmds = Object.values(cfg.hooks || {}).flat().flatMap((g) => g.hooks || []).map((h) => h.command || "");
+    ok(cmds.length === 4, `install writes all four hooks (got ${cmds.length})`);
+    ok(cmds.every((c) => /^node "/.test(c)), `hook commands quote the script path (got: ${cmds[0]})`);
+    ok(cmds.every((c) => !c.includes("\\")), "hook commands contain no backslashes (git-bash on Windows)");
+    const pp = readFileSync(join(dir, ".git", "hooks", "pre-push"), "utf8");
+    ok(/exec node "/.test(pp) && !pp.includes("\\"), "pre-push quotes the path and uses forward slashes");
   }
   console.log("trailstone selfcheck: OK");
 }

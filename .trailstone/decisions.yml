@@ -21,3 +21,41 @@
   scope:
     - trailstone.mjs
     - README.md
+- id: d_a1e538ce
+  at: 2026-09-18T12:26:16.249Z
+  by: vishwamdhavale
+  decision: MCP server mode (trailstone mcp) plus an AGENTS.md/Cursor rules file are the cross-agent path; unasked pre-edit PUSH stays Claude Code only until a harness ships a hook API.
+  why: "Validated live on 4 harnesses: Claude Code (hooks), Codex CLI, Cursor and Claude Desktop (MCP). Codex, Cursor and Claude Desktop each independently refused to build on a stale file. ChatGPT desktop has no local stdio MCP and would need the HTTP transport."
+  scope:
+    - trailstone.mjs
+    - README.md
+- id: d_f3bf68a1
+  at: 2026-09-18T12:26:16.324Z
+  by: vishwamdhavale
+  decision: "MCP tools take an optional repo argument and resolve the repo per call: repo arg, then an absolute file path, then --repo/TRAILSTONE_REPO, then cwd. The no-repo error tells the agent to pass repo."
+  why: Cursor launches the MCP server from the HOME workspace, not the folder you opened, so cwd alone returned 'not inside a git repository' while sitting in a real project. With the actionable error, the Cursor agent self-corrected and retried with the path unaided.
+  scope:
+    - trailstone.mjs
+- id: d_81600b3c
+  at: 2026-09-18T12:35:33.830Z
+  by: vishwamdhavale
+  decision: hasClaude uses where/which instead of `sh -c command -v`, so capture detection works on Windows; and the selfcheck carries a foreign-cwd MCP client profile.
+  why: "sh does not exist on Windows, so passive capture silently disabled itself for every Windows user (failing safe, but failing). The foreign-cwd profile locks in the Cursor bug: Cursor launches the server from the home workspace, not the opened folder."
+  scope:
+    - trailstone.mjs
+- id: d_2af86789
+  at: 2026-09-18T12:41:12.040Z
+  by: vishwamdhavale
+  decision: All generated shell commands (Claude Code hook entries, the pre-push hook) quote the script path and use forward slashes via SELF_CMD, and the selfcheck asserts it.
+  why: "Unquoted paths broke all four hooks for anyone whose path contains a space (/Users/My Name/..., C:\\Users\\John Doe\\...) — silently, so Trailstone looked installed and said nothing. Backslashes additionally break the sh pre-push script under git-bash on Windows. Verified: the assertion fails when the bug is reintroduced, and install into a spaced home now runs cleanly."
+  scope:
+    - trailstone.mjs
+- id: d_71252ec1
+  at: 2026-09-18T12:48:31.774Z
+  by: vishwamdhavale
+  decision: Support node 20.17+ on macOS, Windows and Linux, proven by a 3-OS x 3-node CI matrix rather than by hand; a node without path.matchesGlob warns loudly on the CLI (never in a hook).
+  why: engines was >=22.5 for no reason, excluding node 20 LTS users. Below 20.17 matchesGlob is undefined, the try/catch swallows it, and every glob scope silently governs NOTHING — a precision tool failing quiet. Verified selfcheck + demo + a real hook (0 bytes stderr) on node 20.20.
+  scope:
+    - trailstone.mjs
+    - package.json
+    - .github/workflows/ci.yml

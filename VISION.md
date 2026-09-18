@@ -86,15 +86,46 @@ Plus the feeder that makes the loop real without anyone remembering to log:
 - **One honest metric:** fires that were right versus fires that were wrong. Nothing
   else. `trailstone report --anon` produces a shareable summary of exactly that.
 
-## What is *not* built — where this goes (validate the direction, not just the tool)
+## The format is the contract — build on top of this
 
-- **Teams.** A reversal by one person reaching another at *their* next relevant
-  moment. The YAML-in-repo design is meant to make this a clone, not a database — but
-  it is not built.
-- **A GitHub App** turning a stale flag into an inline check-run annotation on the
-  exact lines, with "re-affirm" / "supersede" actions in the PR.
+The important artifact here is not the script. It is **`.trailstone/decisions.yml`** — a
+small, documented, boring YAML shape (every field is in the README). *That* is the
+standard; `trailstone.mjs` is just the first implementation of it.
+
+So **don't wait for us.** If you want this in a different editor, a different UI, a
+different enforcement point, or a different language, read the ledger and write it. We
+will keep the format stable, and we would rather review your shim than write five
+integrations badly ourselves.
+
+Concretely — the layers, and how portable each already is:
+
+| Layer | Portability today |
+|---|---|
+| **The ledger** (`.trailstone/decisions.yml`) | **Universal.** Plain YAML in your repo; any tool, agent or language can read it. |
+| **Enforcement** (pre-push hook, CI Action) | **Universal.** Git does not care what wrote the code. |
+| **Pull** — an agent *asking* "what governs this file?" | **Universal, shipped.** `trailstone mcp` speaks MCP on stdio for any MCP client; `install` also writes agent rules into `AGENTS.md` / Cursor rules. |
+| **Push** — the warning *injected before* the edit, unasked | **Claude Code only today.** No cross-agent hook standard exists yet. |
+
+That last row is the honest gap, and it matters, because **push is the differentiator.**
+We measured it: agents do not reliably *remember* to ask. A warning an agent must choose
+to look up is a warning it skips. So a shim that gets automatic pre-edit surfacing
+working in Codex, Cursor, Windsurf or Claude Desktop is the single most valuable
+contribution to this project.
+
+## Open directions (not a roadmap we are guarding — things worth building)
+
+- **Push shims for other harnesses.** Pull already works everywhere (MCP + agent rules).
+  What is missing is *unasked, pre-edit* surfacing outside Claude Code — a hook shim for
+  Codex, Cursor, Windsurf or Claude Desktop over the same ledger. Most wanted, and most
+  useful to whoever actually uses that editor daily.
+- **Teams.** A reversal by one person reaching another at *their* next relevant moment.
+  The YAML-in-repo design is meant to make this a clone rather than a database.
+- **A GitHub App** turning a stale flag into an inline check-run annotation on the exact
+  lines, with "re-affirm" / "supersede" actions in the PR.
 - **Richer scope** — from files to globs to symbols/modules ("the auth module").
-- **Other harnesses** — Codex, Cursor, and others, through their own hook shims.
+- **Scope suggestion from the diff**, so a narrow scope is the easy path.
+
+None of these are reserved. If one of them is what you need, build it.
 
 ## The invariants (the constitution — a change here is a pivot, not a feature)
 
@@ -143,7 +174,10 @@ What holds, and what doesn't:
 
 ## Status
 
-v0.1, local-first, MIT-licensed. The mechanism is real and self-verifying; the
-vision above the local tool is a direction we are putting out for validation, not a
-finished system. If the core loop earns its place on your repo, the rings are what
-we build next — with you.
+v0.1, local-first, MIT-licensed. The mechanism is real and self-verifying; everything
+above the local tool is a direction put out for validation, not a finished system.
+
+We are publishing the idea, not guarding it. The problem is real, the loop is small
+enough to reason about, and the format is stable enough to build on. If it earns its
+place on your repo, tell us what the fires were worth (`trailstone report --anon`) — and
+if you need a piece that does not exist yet, that is an invitation, not a waiting list.

@@ -144,6 +144,41 @@ dumps the ledger.
 
 `pre-push` runs `stale` and **exits 1** when a stale file is about to be pushed.
 
+## Other agents — Codex, Cursor, Claude Desktop, …
+
+The ledger is a plain file in your repo, so anything can read it. Two portable surfaces
+ship today.
+
+**1. Agent rules — works everywhere.** `trailstone install` writes a short block into
+`AGENTS.md` (and into `.cursor/rules/trailstone.mdc` if the repo already uses Cursor),
+telling any agent to run `governing <file>` before it edits and to honor what comes back.
+Commit it, and every agent your team uses reads it at session start. `--no-rules` skips it.
+
+**2. An MCP server — any MCP client.** `trailstone mcp` speaks MCP over stdio, with six
+tools: `list_decisions`, `governing`, `stale`, `decide`, `reverse`, `validate`. No
+dependencies, nothing to install beyond this script.
+
+```json
+{
+  "mcpServers": {
+    "trailstone": {
+      "command": "npx",
+      "args": ["-y", "trailstone", "mcp", "--repo", "/absolute/path/to/your/repo"]
+    }
+  }
+}
+```
+
+`--repo` (or the `TRAILSTONE_REPO` env var) matters for desktop clients, which launch MCP
+servers with an arbitrary working directory. A terminal agent already sitting in the repo
+can leave it out.
+
+**The honest limit: both of these are _pull_, not _push_.** The agent has to ask. Only
+Claude Code gets the warning injected *before* the edit without being asked — and that is
+the part that actually changes behaviour, because agents do not reliably remember to ask.
+A hook shim that gets pre-edit surfacing working in another harness is the single most
+valuable contribution to this project.
+
 ## CLI
 
 ```
@@ -246,3 +281,16 @@ private repo. That is how a maintainer learns whether the fires were any good.
 - Codex, Cursor, and other harnesses via their own hook shims over the same file.
 - A `git blame`-shaped `history <file>`: every decision that ever governed it.
 - Scope suggestions from the diff, so `decide` rarely needs `--scope` typed by hand.
+
+## Contributing
+
+- **[VISION.md](VISION.md)** — the idea, the invariants, and an honest list of what this
+  does not do. Read it before judging the tool or proposing a change.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — how to work on it, and what gets declined on
+  principle (dependency cascade, servers, fuzzy gates).
+- **[AGENTS.md](AGENTS.md)** — instructions for AI agents contributing to this repo.
+- **[SECURITY.md](SECURITY.md)** — the whole surface, including the one thing that leaves
+  your machine (the optional capture judge).
+
+The most useful thing you can send back is not a star — it is `trailstone report --anon`:
+how often the stale warning fired on your repo, and whether those fires were right.
