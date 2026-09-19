@@ -334,6 +334,11 @@ async function hook() {
   // fires (V0 rerun, arm D: every prompt fire was the judge's). No hooks for the judge.
   if (process.env.TRAILSTONE_CAPTURE_JUDGE) process.exit(0);
   const event = input.hook_event_name;
+  // Cursor IMPORTS Claude Code's hooks from ~/.claude/settings.json and runs them under its OWN
+  // event names (sessionStart / preToolUse / stop, lower camel) and its own output contract. So
+  // the same entry gets called by both harnesses, and answering in Claude's dialect there means
+  // exiting 0 silently forever. Detect the dialect from the event name and answer in it.
+  if (CURSOR_EVENTS.has(event)) return cursorHook(input);
   const r = root(input.cwd || process.cwd());
   if (!r) process.exit(0); // not a git repo → nothing to say, and never a blocked prompt
   const rows = load(r);
@@ -595,10 +600,11 @@ const fileProblem = (r, f) => {
 // interrupts nothing that was not going to be stopped anyway. Blocking merely-governed edits would
 // be new interference, and "a false stale flag is worse than a missed one" applies doubly here.
 // Every failure path prints {"permission":"allow"} and exits 0 — a hook must never strand the agent.
-function cursorHook() {
+const CURSOR_EVENTS = new Set(["sessionStart", "preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile", "beforeSubmitPrompt", "stop", "afterFileEdit"]);
+function cursorHook(pre) {
   const allow = () => { process.stdout.write(JSON.stringify({ permission: "allow" })); process.exit(0); };
-  let input = {};
-  try { input = JSON.parse(readFileSync(0, "utf8") || "{}"); } catch { allow(); }
+  let input = pre || {};
+  if (!pre) { try { input = JSON.parse(readFileSync(0, "utf8") || "{}"); } catch { allow(); } }
   try {
     if (process.env.TRAILSTONE_CAPTURE_JUDGE) allow();
     const event = input.hook_event_name;
@@ -1159,9 +1165,17 @@ function writeCursorHooks(r) {
   const rel = win ? ".cursor/hooks/trailstone.cmd" : ".cursor/hooks/trailstone.sh";
   const wrapper = join(r, ".cursor", "hooks", basename(rel));
   mkdirSync(dirname(wrapper), { recursive: true });
+  // Bake in the absolute node that ran `install`, and fall back to PATH only if it is gone.
+  // A GUI editor launched from a desktop icon does NOT inherit your shell's PATH, so bare `node`
+  // is frequently missing for anyone using nvm/fnm/asdf — which is most JS developers. Use
+  // realpath, because a version manager's `which node` can be an ephemeral per-shell symlink
+  // (fnm_multishells/<pid>/bin/node) that vanishes with the shell that made it.
+  let nodeBin = process.execPath;
+  try { nodeBin = realpathSync(process.execPath); } catch {}
+  const NODE_CMD = nodeBin.replace(/\\/g, "/");
   writeFileSync(wrapper, win
-    ? `@echo off\r\nnode "${SELF_CMD}" cursor-hook\r\n`
-    : `#!/bin/sh\n# written by trailstone install — see ${LEDGER}\nexec node "${SELF_CMD}" cursor-hook\n`);
+    ? `@echo off\r\nset "NODE=${nodeBin}"\r\nif not exist "%NODE%" set "NODE=node"\r\n"%NODE%" "${SELF_CMD}" cursor-hook\r\n`
+    : `#!/bin/sh\n# written by trailstone install — see ${LEDGER}\nNODE="${NODE_CMD}"\n[ -x "$NODE" ] || NODE=node\nexec "$NODE" "${SELF_CMD}" cursor-hook\n`);
   if (!win) try { chmodSync(wrapper, 0o755); } catch {}
   let added = 0;
   for (const ev of ["sessionStart", "preToolUse"]) {
@@ -1506,6 +1520,14 @@ function selfcheck() {
         `hooks.json command is a repo-relative SCRIPT PATH, not a command line (got ${JSON.stringify(cmds)})`);
       const wrap = join(d4, ".cursor", "hooks", process.platform === "win32" ? "trailstone.cmd" : "trailstone.sh");
       ok(existsSync(wrap), "install writes the wrapper script the hooks.json points at");
+      // Cursor imports Claude Code's hook entries and calls them with ITS event names. The same
+      // `trailstone.mjs hook` entry therefore has to answer in both dialects, or it exits 0
+      // silently in Cursor forever — which is exactly what it did.
+      const viaClaudeEntry = spawnSync(process.execPath, [SELF, "hook"], { cwd: d4, encoding: "utf8", input: JSON.stringify(W("src/a.ts", `dialect-${Date.now()}`)) });
+      ok(viaClaudeEntry.status === 0 && JSON.parse(viaClaudeEntry.stdout || "{}").permission === "deny",
+        "the `hook` entry answers Cursor's dialect (Cursor imports Claude Code hooks and calls them)");
+      const viaCC = spawnSync(process.execPath, [SELF, "hook"], { cwd: d4, encoding: "utf8", input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: d4, session_id: `ccs-${Date.now()}`, tool_input: { file_path: "src/a.ts" } }) });
+      ok(/additionalContext/.test(viaCC.stdout || ""), "and still answers Claude Code's own dialect");
       if (process.platform !== "win32") {
         const viaWrapper = spawnSync(wrap, [], { cwd: d4, input: JSON.stringify(W("src/a.ts", "wrapconv")), encoding: "utf8" });
         ok(viaWrapper.status === 0 && JSON.parse(viaWrapper.stdout).permission === "deny", "the wrapper script runs and denies a stale write, exactly as Cursor invokes it");

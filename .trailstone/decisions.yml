@@ -177,3 +177,10 @@
   why: Cursor's command field is a path to a script, not a command string. Writing 'node "<abs>" cursor-hook' loaded NOTHING and left the Hooks tab empty with no error — found only by opening Cursor. install now writes .cursor/hooks/trailstone.sh (or .cmd on Windows) and points at it, and wires the hooks independently of --no-rules, which is about prose in the repo, not about the push surface.
   scope:
     - trailstone.mjs
+- id: d_f0081fee
+  at: 2026-09-19T07:41:36.001Z
+  by: vishwamdhavale
+  decision: "One hook entry answers both harnesses: Cursor imports Claude Code hooks and calls them with its own event names, so hook() detects the dialect and replies in it"
+  why: Cursor's Hooks panel showed our Claude Code entries remapped to sessionStart/preToolUse/stop. hook() matched only Claude's PascalCase names, so under Cursor it exited 0 silently every time. Detecting the dialect means anyone who already ran install for Claude Code gets Cursor push with no extra config. The wrapper also bakes an absolute node path, because a GUI editor inherits no shell PATH and bare node is missing for anyone on nvm/fnm/asdf.
+  scope:
+    - trailstone.mjs
