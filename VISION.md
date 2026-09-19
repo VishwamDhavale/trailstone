@@ -104,20 +104,31 @@ Concretely — the layers, and how portable each already is:
 | **The ledger** (`.trailstone/decisions.yml`) | **Universal.** Plain YAML in your repo; any tool, agent or language can read it. |
 | **Enforcement** (pre-push hook, CI Action) | **Universal.** Git does not care what wrote the code. |
 | **Pull** — an agent *asking* "what governs this file?" | **Universal, shipped.** `trailstone mcp` speaks MCP on stdio for any MCP client; `install` also writes agent rules into `AGENTS.md` / Cursor rules. |
-| **Push** — the warning *injected before* the edit, unasked | **Claude Code only today.** No cross-agent hook standard exists yet. |
+| **Push** — the warning *injected before* the edit, unasked | **Claude Code and Cursor.** Each has its own hook system; there is no shared standard, so each needs a shim. |
 
-That last row is the honest gap, and it matters, because **push is the differentiator.**
-We measured it: agents do not reliably *remember* to ask. A warning an agent must choose
-to look up is a warning it skips. So a shim that gets automatic pre-edit surfacing
-working in Codex, Cursor, Windsurf or Claude Desktop is the single most valuable
-contribution to this project.
+That last row is where the work is, because **push is the differentiator.** We measured it:
+agents do not reliably *remember* to ask, and a warning an agent must choose to look up is a
+warning it skips.
+
+Two harnesses have it today, and they are not the same shape:
+
+- **Claude Code** — `PreToolUse` returns `additionalContext` alongside an *allow*. The agent is
+  told, nothing is blocked.
+- **Cursor** — `.cursor/hooks.json`. `sessionStart` injects `additional_context` freely, but
+  `preToolUse` can only reach the agent via `agent_message` **on a deny**. So Trailstone denies
+  exactly once, only when the file is genuinely *stale* — the same condition that already blocks
+  a push — and allows the retry. Merely-governed edits are never blocked, because that would be
+  new interference bought with no new safety.
+
+Codex, Windsurf and Claude Desktop are still pull-only. A shim that gets unasked pre-edit
+surfacing working in one of those is the most valuable contribution to this project.
 
 ## Open directions (not a roadmap we are guarding — things worth building)
 
-- **Push shims for other harnesses.** Pull already works everywhere (MCP + agent rules).
-  What is missing is *unasked, pre-edit* surfacing outside Claude Code — a hook shim for
-  Codex, Cursor, Windsurf or Claude Desktop over the same ledger. Most wanted, and most
-  useful to whoever actually uses that editor daily.
+- **Push shims for the remaining harnesses.** Pull works everywhere (MCP + agent rules); push
+  works in Claude Code and Cursor. Codex, Windsurf and Claude Desktop are still pull-only, and a
+  hook shim for one of them over the same ledger is the most useful thing to build — most useful
+  of all if you are the person who lives in that editor daily.
 - **Teams.** A reversal by one person reaching another at *their* next relevant moment.
   The YAML-in-repo design is meant to make this a clone rather than a database.
 - **A GitHub App** turning a stale flag into an inline check-run annotation on the exact

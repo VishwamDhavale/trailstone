@@ -161,3 +161,12 @@
   why: "A CI gate (trailstone stale) on a repo whose ledger was never committed printed 'trailstone: clean.' and exited 0 — green forever, gating nothing, silently. Exit 0 stays, because a repo that never opted in must never be blocked; what changes is that a gate no longer claims to have checked something it could not see."
   scope:
     - trailstone.mjs
+- id: d_d44acc6c
+  at: 2026-09-19T07:16:00.961Z
+  by: vishwamdhavale
+  decision: "Cursor gets push via .cursor/hooks.json: sessionStart injects context, preToolUse denies a STALE write exactly once with the reversal and allows the retry"
+  why: "Cursor shipped hooks, so 'Claude Code only' was out of date. Its preToolUse can only reach the agent via agent_message on a DENY — there is no allow-and-inject. Denying only on stale keeps this inside the invariants: stale is already the condition that fails a push, so nothing is interrupted that was not going to be stopped, and merely-governed edits are never blocked. The deny is once per (conversation, repo, file) so the agent is never trapped in a loop."
+  scope:
+    - trailstone.mjs
+    - README.md
+    - VISION.md

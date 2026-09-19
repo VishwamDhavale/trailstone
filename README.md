@@ -194,11 +194,17 @@ the agent to pass its project path as the `repo` argument, which agents do recov
 > With no `--repo` the first call asks the agent for the project path, and the repo is then
 > explicit in the conversation.
 
-**The honest limit: both of these are _pull_, not _push_.** The agent has to ask. Only
-Claude Code gets the warning injected *before* the edit without being asked — and that is
-the part that actually changes behaviour, because agents do not reliably remember to ask.
-A hook shim that gets pre-edit surfacing working in another harness is the single most
-valuable contribution to this project.
+**3. Cursor hooks — push, not pull.** If the repo has a `.cursor/` directory, `install` also
+writes `.cursor/hooks.json` (merging into any hooks you already have). `sessionStart` injects the
+goal, the decisions in force and anything stale; `preToolUse` **denies a write to a stale file
+exactly once**, handing the agent the reversal, and allows the retry. That one-time deny is the
+only way Cursor lets a hook reach the agent before an edit — and it fires only on files that are
+already blocked at push, so it interrupts nothing that was not going to be stopped anyway.
+
+**The honest limit.** Push — the warning arriving *unasked, before the edit* — works in Claude
+Code and Cursor. Codex, Windsurf and Claude Desktop are pull-only: the agent has to ask, and
+agents do not reliably remember to. A hook shim for one of those is the most valuable
+contribution to this project.
 
 ## CLI
 

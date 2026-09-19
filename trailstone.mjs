@@ -49,7 +49,7 @@ import { join, dirname, relative, isAbsolute, matchesGlob, basename } from "node
 const HAS_GLOB = typeof matchesGlob === "function";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Single source of truth is package.json (shipped beside this file); the literal is the
@@ -583,6 +583,70 @@ const fileProblem = (r, f) => {
   catch { return `no such file in this repo: ${f} — check the path`; }
 };
 
+
+// ── Cursor hooks ──────────────────────────────────────────────────────────────
+// Cursor ships its own hook system (.cursor/hooks.json), but with ONE constraint that shapes
+// everything: `preToolUse` can only send `agent_message` when it DENIES the tool call. There is
+// no allow-and-inject, the way Claude Code's PreToolUse additionalContext works. So:
+//   sessionStart            → additional_context (non-blocking; goal, decisions, stale)
+//   preToolUse on a STALE file → deny ONCE with the reversal, then allow the retry
+//   preToolUse otherwise    → allow, silently
+// Denying only on stale is deliberate: stale is already the condition that blocks a push, so this
+// interrupts nothing that was not going to be stopped anyway. Blocking merely-governed edits would
+// be new interference, and "a false stale flag is worse than a missed one" applies doubly here.
+// Every failure path prints {"permission":"allow"} and exits 0 — a hook must never strand the agent.
+function cursorHook() {
+  const allow = () => { process.stdout.write(JSON.stringify({ permission: "allow" })); process.exit(0); };
+  let input = {};
+  try { input = JSON.parse(readFileSync(0, "utf8") || "{}"); } catch { allow(); }
+  try {
+    if (process.env.TRAILSTONE_CAPTURE_JUDGE) allow();
+    const event = input.hook_event_name;
+    const r = root(input.cwd || (input.workspace_roots || [])[0] || process.cwd());
+    if (!r) allow();
+    const rows = load(r);
+    if (!rows) allow();
+
+    if (event === "sessionStart") {
+      const st = stale(r, rows), n = inForce(rows).length, p = proposed(rows).length;
+      logFires(r, st, "session");
+      const ctx = `# Trailstone — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") +
+        `${n} decisions in force in ${LEDGER}, ${p} proposed. Before you edit a file, run ` +
+        `\`node "${SELF_CMD}" governing <file>\` and honor what comes back. Record real choices with ` +
+        `\`decide "<what>" --why "<why>" --scope <paths>\`.` + (st.length ? "\n\n" + renderStale(st) : "");
+      process.stdout.write(JSON.stringify({ additional_context: ctx })); process.exit(0);
+    }
+
+    if (event === "preToolUse") {
+      const ti = input.tool_input || {};
+      // Cursor documents tool_input as carrying "the relevant file path" without naming the field,
+      // and the name has differed across versions — accept every spelling seen rather than guess one.
+      const fp = ti.file_path || ti.filePath || ti.target_file || ti.path || ti.file;
+      if (!fp || !/write|edit|delete/i.test(String(input.tool_name || ""))) allow();
+      const f = toPosix(isAbsolute(fp) ? relative(r, fp) : fp);
+      if (!f || f.startsWith("..")) allow();
+      const st = stale(r, rows).filter((x) => x.file === f);
+      if (!st.length) allow();
+      // Once per (conversation, file): denying the retry too would trap the agent in a loop.
+      // Key the dedupe by conversation AND repo: these files live in /tmp and outlive the run, so a
+      // conversation id reused across repos (or a fixed one in a test) would silently suppress the
+      // warning in a repo that never showed it. Found exactly that way.
+      const sf = sessFile(`${input.conversation_id || "noconv"}-${createHash("sha1").update(r).digest("hex").slice(0, 8)}`, "cursor-edit"), seen = readJson(sf, []);
+      if (seen.includes(f)) allow();
+      try { writeFileSync(sf, JSON.stringify([...seen, f].slice(-50))); } catch {}
+      logFires(r, st, "edit");
+      process.stdout.write(JSON.stringify({
+        permission: "deny",
+        user_message: `Trailstone: ${f} rests on a reversed decision — the agent has been told what changed.`,
+        agent_message: renderStale(st) + `\n\nThis is a ONE-TIME notice, not a refusal: make the same edit again and it will proceed. ` +
+          `Re-check the file against the decision above first, and tell the user what changed, what you re-checked, and what you propose.`,
+      }));
+      process.exit(0);
+    }
+    allow();
+  } catch { allow(); }
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 const SELF = fileURLToPath(import.meta.url);
 // Generated commands land in a shell: Claude Code's hook runner, and git's bash for the
@@ -632,7 +696,7 @@ async function main(argv) {
   // Help and version must work anywhere: outside a repo is exactly where someone types their
   // first command after `npm i -g trailstone`, and "not a git repo" is a terrible first answer.
   const HELPISH = [undefined, "--help", "-h", "help", "--version", "-v", "version"];
-  if (!r && !["--selfcheck", "install", "capture-health", "demo", "hook", "doctor", "mcp"].includes(cmd) && !HELPISH.includes(cmd)) {
+  if (!r && !["--selfcheck", "install", "capture-health", "demo", "hook", "cursor-hook", "doctor", "mcp"].includes(cmd) && !HELPISH.includes(cmd)) {
     console.error(`not a git repository: ${process.cwd()}\n\`trailstone\` reads and writes a ledger in your repo — cd into one, or \`git init\`.\nNo repo to hand? \`trailstone demo\` shows the whole loop on a throwaway one.`);
     process.exit(2);
   }
@@ -723,6 +787,7 @@ async function main(argv) {
     case "proposed": { const p = proposed(need(r)); if (!p.length) console.log("nothing proposed"); for (const d of p) console.log(`${d.id}  ${d.decision}${d.supersedes ? `  (reverses ${d.supersedes})` : ""}${d.scope?.length ? `  [${d.scope.join(", ")}]` : ""}`); return; }
     case "ratify": return setStatus(r, need(r), pos[0], null);
     case "reject": return setStatus(r, need(r), pos[0], "rejected");
+    case "cursor-hook": return cursorHook();
     case "governing": {
       const rows = need(r), f = pos[0] || "";
       const prob = fileProblem(r, f);
@@ -1077,7 +1142,27 @@ function writeRules(r) {
     const c = join(r, ".cursor", "rules", "trailstone.mdc");
     if (existsSync(c)) console.log(`${c} exists — left alone`);
     else { mkdirSync(dirname(c), { recursive: true }); writeFileSync(c, `---\nalwaysApply: true\n---\n\n${block}\n`); console.log(`wrote ${c} (Cursor)`); }
+    writeCursorHooks(r);
   }
+}
+
+// Cursor's own hook system, which turns its PULL surface (rules + MCP: the agent must ask) into a
+// PUSH one (it is told, unasked). Merged into any existing hooks.json rather than overwriting it —
+// that file is the user's, and other tools live in it too.
+function writeCursorHooks(r) {
+  const p = join(r, ".cursor", "hooks.json");
+  const cfg = readJson(p, null) || { version: 1, hooks: {} };
+  cfg.version = cfg.version || 1; cfg.hooks = cfg.hooks || {};
+  const cmd = `node "${SELF_CMD}" cursor-hook`;
+  let added = 0;
+  for (const ev of ["sessionStart", "preToolUse"]) {
+    cfg.hooks[ev] = cfg.hooks[ev] || [];
+    if (cfg.hooks[ev].some((h) => (h.command || "").includes(basename(SELF)))) continue;
+    cfg.hooks[ev].push({ command: cmd }); added++;
+  }
+  if (!added) return console.log(`${p} already wired — left alone`);
+  writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+  console.log(`wrote ${p} (Cursor hooks: pre-edit stale warnings, unasked)`);
 }
 
 // A tool that writes into ~/.claude/settings.json and .git/hooks must have a way out, or
@@ -1102,6 +1187,22 @@ function uninstall() {
     const pp = join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push");
     if (existsSync(pp) && readFileSync(pp, "utf8").includes(basename(SELF))) { rmSync(pp); console.log(`removed ${pp}`); }
     else if (existsSync(pp)) console.log(`${pp} is not ours — left alone`);
+
+    // Cursor hooks: strip only OUR entries, keep everyone else's, and delete the file only if it
+    // is left with nothing but a version number — it is the user's file, not ours.
+    const ch = join(r, ".cursor", "hooks.json"), cfg = readJson(ch, null);
+    if (cfg?.hooks) {
+      let n = 0;
+      for (const ev of Object.keys(cfg.hooks)) {
+        const keep = (cfg.hooks[ev] || []).filter((h) => !(h.command || "").includes(basename(SELF)));
+        n += (cfg.hooks[ev] || []).length - keep.length;
+        if (keep.length) cfg.hooks[ev] = keep; else delete cfg.hooks[ev];
+      }
+      if (n) {
+        if (!Object.keys(cfg.hooks).length) { rmSync(ch); console.log(`removed ${ch} (it held only our hooks)`); }
+        else { writeFileSync(ch, JSON.stringify(cfg, null, 2) + "\n"); console.log(`removed ${n} Cursor hook${n === 1 ? "" : "s"} from ${ch}`); }
+      }
+    }
   }
   console.log("Left alone on purpose: .trailstone/decisions.yml (your decisions) and any AGENTS.md block (your repo's content). Delete those yourself if you want them gone.");
 }
@@ -1343,6 +1444,38 @@ function selfcheck() {
       ok(p3.status === 0, "stale on a repo with no ledger still exits 0 (never block an opt-out repo)");
       ok(/no ledger here/.test(p3.stdout) && !/clean/.test(p3.stdout.replace(/NOT "clean"/, "")), "stale on a repo with no ledger does NOT report 'clean'");
       rmSync(d3, { recursive: true, force: true });
+    }
+
+    // Cursor hooks. The rule that matters: this thing sits in front of every tool call in the
+    // editor, so every path that is not "a stale write, first time" must ALLOW and exit 0.
+    {
+      const d4 = join(tmpdir(), `trailstone-cursor-${Date.now()}`); mkdirSync(join(d4, "src"), { recursive: true });
+      const gg = (...a) => git(a, d4);
+      gg("init", "-q"); gg("config", "user.email", "t@t"); gg("config", "user.name", "t");
+      writeFileSync(join(d4, "src", "a.ts"), "a"); writeFileSync(join(d4, "src", "b.ts"), "b"); gg("add", ".");
+      execFileSync("git", ["commit", "-q", "-m", "w", "--date", "2020-01-01T00:00:00Z"], { cwd: d4, env: { ...process.env, GIT_COMMITTER_DATE: "2020-01-01T00:00:00Z" } });
+      mkdirSync(join(d4, ".trailstone")); writeFileSync(join(d4, LEDGER), HEADER);
+      const cli = (...a) => spawnSync(process.execPath, [SELF, ...a], { cwd: d4, encoding: "utf8" }).stdout;
+      const id = (cli("decide", "JWT header, not cookies", "--why", "w", "--scope", "src/a.ts").match(/d_[a-f0-9]+/) || [])[0];
+      cli("reverse", id, "HttpOnly cookie, not a JWT header", "--why", "w");
+      const ch = (obj) => spawnSync(process.execPath, [SELF, "cursor-hook"], { cwd: d4, input: JSON.stringify(obj), encoding: "utf8" });
+      const W = (file, conv) => ({ hook_event_name: "preToolUse", cwd: d4, conversation_id: conv, tool_name: "Write", tool_input: { file_path: file } });
+
+      const denied = ch(W("src/a.ts", "c1"));
+      ok(denied.status === 0, "cursor-hook exits 0 even when denying");
+      const dj = JSON.parse(denied.stdout);
+      ok(dj.permission === "deny" && /HttpOnly cookie/.test(dj.agent_message || ""), "a stale write is denied once, carrying the reversal");
+      ok(JSON.parse(ch(W("src/a.ts", "c1")).stdout).permission === "allow", "the retry is allowed — never trap the agent in a deny loop");
+      ok(JSON.parse(ch(W("src/b.ts", "c2")).stdout).permission === "allow", "a file with no stale flag is allowed");
+      ok(JSON.parse(ch({ ...W("src/a.ts", "c3"), tool_name: "Read" }).stdout).permission === "allow", "a Read is never denied, even on a stale file");
+      ok(JSON.parse(ch({ hook_event_name: "preToolUse", cwd: "/", conversation_id: "c4", tool_name: "Write", tool_input: { file_path: "/x.ts" } }).stdout).permission === "allow", "outside a repo, cursor-hook allows");
+      for (const bad of ["not json", "", "{}"]) {
+        const b = spawnSync(process.execPath, [SELF, "cursor-hook"], { cwd: d4, input: bad, encoding: "utf8" });
+        ok(b.status === 0 && JSON.parse(b.stdout).permission === "allow", `cursor-hook allows on malformed input (${JSON.stringify(bad)})`);
+      }
+      const ss = JSON.parse(ch({ hook_event_name: "sessionStart", cwd: d4 }).stdout);
+      ok(typeof ss.additional_context === "string" && /STALE/.test(ss.additional_context), "sessionStart injects context including the stale warning");
+      rmSync(d4, { recursive: true, force: true });
     }
     // A scope that matches nothing records a decision that looks in force and can never fire.
     const dec = (sc) => spawnSync(process.execPath, [SELF, "decide", "X not Y", "--why", "w", "--scope", sc], { cwd: dir, encoding: "utf8" }).stdout;
