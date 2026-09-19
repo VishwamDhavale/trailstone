@@ -30,6 +30,8 @@ of what the tool does not do.
 node trailstone.mjs --selfcheck   # the test suite. Must pass before and after your change.
 node trailstone.mjs demo          # the whole loop on a throwaway repo, ten seconds
 node trailstone.mjs doctor        # is Trailstone actually watching this repo?
+node scripts/cold-install.mjs     # packs the tarball, installs it into a throwaway HOME,
+                                  # and drives the loop through the INSTALLED binary
 ```
 
 `--selfcheck` spins up throwaway git repos and asserts real behaviour: glob governance,
@@ -38,6 +40,14 @@ fire log, and that **every hook exits 0 with no stderr across six failure modes*
 
 **If you add non-trivial logic, add an assertion to `--selfcheck`.** No frameworks, no
 fixtures — the smallest thing that fails if your logic breaks.
+
+`--selfcheck` runs the working tree. It cannot see whether the *published* artifact installs and
+runs — version strings, the `bin` symlink, files missing from the npm package, a hook command that
+a GUI editor cannot resolve. `scripts/cold-install.mjs` closes that: it `npm pack`s the real
+tarball, installs it globally into a throwaway HOME (never yours), and runs the whole loop through
+the installed `trailstone` binary. **Run it before every release**; CI runs it on every push. Every
+release-blocking bug we have shipped lived in exactly this gap — a machine that already has the
+tool set up hides what a new user hits first.
 
 ## The invariants — not up for debate
 

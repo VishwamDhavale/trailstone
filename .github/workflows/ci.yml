@@ -30,3 +30,20 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "22" }
       - run: node trailstone.mjs stale
+
+  cold-install:
+    name: cold install from the tarball
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The one thing --selfcheck cannot see: does the PUBLISHED artifact install and run?
+        # Runs on macOS and Linux (the wrapper + bin paths differ per OS); needs git configured.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: git config --global user.email ci@example.com && git config --global user.name CI
+      - run: node scripts/cold-install.mjs

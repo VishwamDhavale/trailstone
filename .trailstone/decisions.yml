@@ -207,3 +207,12 @@
   why: install writes .cursor/hooks/trailstone.sh into the repo, so it travels to teammates whose machines have neither this node nor this trailstone at those paths. Absolute first (fastest, and the only thing a GUI editor with no PATH can use), then PATH, then npx.
   scope:
     - trailstone.mjs
+- id: d_08c2f078
+  at: 2026-09-19T11:38:15.752Z
+  by: vishwamdhavale
+  decision: A cold-install test packs the published tarball, installs it into a throwaway HOME, and drives the loop through the installed binary; CI runs it every push
+  why: true
+  scope:
+    - scripts/cold-install.mjs
+    - .github/workflows/ci.yml
+    - CONTRIBUTING.md
