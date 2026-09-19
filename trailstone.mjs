@@ -1178,9 +1178,19 @@ function writeCursorHooks(r) {
   // realpath, because a version manager's `which node` can be an ephemeral per-shell symlink
   // (fnm_multishells/<pid>/bin/node) that vanishes with the shell that made it.
   const nodeBin = NODE_ABS, NODE_CMD = NODE_ABS;
+  // This file gets COMMITTED, so it must work on a teammate's machine too — the absolute paths
+  // baked in for the local GUI case are meaningless there. Try them first (fastest, and the only
+  // thing that works when a GUI editor has no PATH), then a `trailstone` on PATH, then npx.
   writeFileSync(wrapper, win
-    ? `@echo off\r\nset "NODE=${nodeBin}"\r\nif not exist "%NODE%" set "NODE=node"\r\n"%NODE%" "${SELF_CMD}" cursor-hook\r\n`
-    : `#!/bin/sh\n# written by trailstone install — see ${LEDGER}\nNODE="${NODE_CMD}"\n[ -x "$NODE" ] || NODE=node\nexec "$NODE" "${SELF_CMD}" cursor-hook\n`);
+    ? `@echo off\r\nset "NODE=${nodeBin}"\r\n` +
+      `if exist "%NODE%" if exist "${SELF_CMD}" ( "%NODE%" "${SELF_CMD}" cursor-hook & exit /b 0 )\r\n` +
+      `where trailstone >nul 2>nul && ( trailstone cursor-hook & exit /b 0 )\r\n` +
+      `npx -y trailstone cursor-hook\r\n`
+    : `#!/bin/sh\n# written by \`trailstone install\` — safe to commit: it falls back for other machines.\n` +
+      `NODE="${NODE_CMD}"\nSELF="${SELF_CMD}"\n` +
+      `[ -x "$NODE" ] && [ -f "$SELF" ] && exec "$NODE" "$SELF" cursor-hook\n` +
+      `command -v trailstone >/dev/null 2>&1 && exec trailstone cursor-hook\n` +
+      `exec npx -y trailstone cursor-hook\n`);
   if (!win) try { chmodSync(wrapper, 0o755); } catch {}
   let added = 0;
   for (const ev of ["sessionStart", "preToolUse"]) {
@@ -1531,6 +1541,16 @@ function selfcheck() {
         `hooks.json command is a repo-relative SCRIPT PATH, not a command line (got ${JSON.stringify(cmds)})`);
       const wrap = join(d4, ".cursor", "hooks", process.platform === "win32" ? "trailstone.cmd" : "trailstone.sh");
       ok(existsSync(wrap), "install writes the wrapper script the hooks.json points at");
+      // The wrapper is COMMITTED, so it runs on machines where the baked-in absolute paths mean
+      // nothing. It must fall through to a `trailstone` on PATH, then npx, rather than die.
+      if (process.platform !== "win32") {
+        const w = readFileSync(wrap, "utf8");
+        ok(/command -v trailstone/.test(w) && /npx -y trailstone/.test(w), "the committed wrapper falls back to PATH then npx for other machines");
+        const broken = w.replace(/^SELF=.*$/m, 'SELF="/nonexistent/trailstone.mjs"');
+        writeFileSync(wrap, broken); chmodSync(wrap, 0o755);
+        const r2 = spawnSync(wrap, [], { cwd: d4, input: JSON.stringify(W("src/a.ts", `fallback-${Date.now()}`)), encoding: "utf8", env: { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}` } });
+        ok(r2.status === 0, "the fallback chain still exits 0 when the baked path is gone");
+      }
       // A brand-new repo has no .cursor/ — keying the Cursor hooks off that gave a fresh Cursor
       // user no push at all. The check is now "does this USER have Cursor", which a machine with
       // Trailstone already installed can never surface; only a cold install does.

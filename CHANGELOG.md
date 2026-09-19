@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3
+
+**Fixed — `.cursor/hooks/trailstone.sh` is committed, so it has to run on someone else's machine.**
+It carried only this machine's absolute paths to node and to trailstone, which are meaningless in a
+teammate's clone. It now tries those first (fastest, and the only thing that works when a GUI editor
+has no PATH), then a `trailstone` on PATH, then `npx -y trailstone`. Verified by breaking the baked
+path and confirming the fallback still denies a stale write.
+
+
 ## 0.2.2
 
 **Push reaches Cursor, not just Claude Code.** A reversed decision arrives before a Cursor agent

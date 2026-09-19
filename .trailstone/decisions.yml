@@ -200,3 +200,10 @@
     - trailstone.mjs
     - README.md
     - VISION.md
+- id: d_264b56de
+  at: 2026-09-19T08:23:37.971Z
+  by: vishwamdhavale
+  decision: The Cursor wrapper falls back from baked absolute paths to a trailstone on PATH, then npx, because the file is committed
+  why: install writes .cursor/hooks/trailstone.sh into the repo, so it travels to teammates whose machines have neither this node nor this trailstone at those paths. Absolute first (fastest, and the only thing a GUI editor with no PATH can use), then PATH, then npx.
+  scope:
+    - trailstone.mjs
