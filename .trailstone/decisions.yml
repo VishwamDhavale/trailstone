@@ -126,3 +126,10 @@
   scope:
     - trailstone.mjs
     - README.md
+- id: d_5416ef94
+  at: 2026-09-19T05:48:05.195Z
+  by: vishwamdhavale
+  decision: The capture judge gets a 300s timeout, not 90s
+  why: "Measured: a trivial 2-assistant-row transcript took 45s end to end because the judge's own claude -p boots a session before answering, and 90s had already produced a real ETIMEDOUT. The Stop worker is detached, so a slow judge costs the session nothing — a missed capture costs a decision."
+  scope:
+    - trailstone.mjs

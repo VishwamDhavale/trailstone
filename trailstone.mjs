@@ -492,7 +492,10 @@ export function judge(turn, governing = [], touched = []) {
   try {
     out = execFileSync("claude", ["-p", "--model", JUDGE_MODEL, "--output-format", "json"], {
       input: PROMPT(turn.userAsk, turn.assistant, governing, touched),
-      encoding: "utf8", timeout: 90000, maxBuffer: 8 * 1024 * 1024,
+      // 300s, not 90s: a trivial 2-row transcript already took 45s end to end (the judge's own
+      // `claude -p` boots a session before it answers), and 90s timed out on a real one. The
+      // worker is DETACHED, so a slow judge costs the user nothing — only a missed capture does.
+      encoding: "utf8", timeout: 300000, maxBuffer: 8 * 1024 * 1024,
       env: { ...process.env, TRAILSTONE_CAPTURE_JUDGE: "1" }, // the judge's own Stop hook must not judge back
     });
   } catch (e) {
