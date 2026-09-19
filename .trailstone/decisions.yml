@@ -140,3 +140,10 @@
   why: Cursor asked about src/App.tsx in a Next.js repo and got 'ungoverned' — the same answer a real, clear file gets. An agent that mistypes or guesses a path is told it may proceed. A file on disk but untracked stays 'ungoverned', since a directory scope may still cover it.
   scope:
     - trailstone.mjs
+- id: d_6b433e47
+  at: 2026-09-19T05:56:49.035Z
+  by: vishwamdhavale
+  decision: A scope that matches no tracked file is reported as a defect, not a count of zero
+  why: "decide accepted --scope srcc/ and /etc/ as ordinary successes: the decision lands in the ledger, reads as in force, governs nothing and can never flag anything on reversal. For a tool whose premise is that a decision knows what it governs, a silently dead decision is the worst possible entry. The no-scope case already warned; zero-match is the same outcome and now warns in the same words, in the CLI and over MCP."
+  scope:
+    - trailstone.mjs

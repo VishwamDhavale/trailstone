@@ -567,10 +567,16 @@ async function capture(r, rows, transcriptPath) {
 // is dangerous: an agent that mistypes or guesses a path is told it is clear to proceed. A file
 // that exists on disk but is untracked is fine (new file, may be covered by a directory scope);
 // one that is neither on disk nor tracked does not exist, and we say so.
-const missingFile = (r, f) => {
-  if (!f) return false;
-  try { if (existsSync(isAbsolute(f) ? f : join(r, f))) return false; } catch { return false; }
-  try { return !git(["ls-files", "--error-unmatch", "--", f], r); } catch { return true; }
+// Returns a reason string when we must NOT answer "ungoverned", else null.
+const fileProblem = (r, f) => {
+  if (!f) return "no file given — pass a path relative to the repo root";
+  // Outside the repo entirely (/etc/passwd, ../sibling) is not "ungoverned": this ledger
+  // says nothing about it either way, and saying "ungoverned" reads as "clear to proceed".
+  const rp = toPosix(relative(r, isAbsolute(f) ? f : join(r, f)));
+  if (rp === ".." || rp.startsWith("../") || isAbsolute(rp)) return `that path is outside this repo (${r}) — this ledger governs nothing there`;
+  try { if (existsSync(isAbsolute(f) ? f : join(r, f))) return null; } catch { return null; }
+  try { return git(["ls-files", "--error-unmatch", "--", rp], r) ? null : `no such file in this repo: ${f} — check the path`; }
+  catch { return `no such file in this repo: ${f} — check the path`; }
 };
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -660,6 +666,15 @@ async function main(argv) {
       if (row.scope?.length) {
         const tracked = trackedFiles(r);
         const n = tracked.filter((file) => scopeHits(row.scope, file)).length;
+        // 0 is not a count, it is a defect: a scope matching nothing (a typo, a path outside the
+        // repo, a glob on a node without path.matchesGlob) records a decision that LOOKS in force,
+        // reads as in force, and can never flag anything. Same outcome as no scope at all, which
+        // we already warn about — so warn about this too, in the same words.
+        if (!n) {
+          console.log(`⚠ scope ${row.scope.join(", ")} matches NO tracked file in this repo, so this decision governs nothing and a reversal will flag nothing.`);
+          console.log(`  Check the path (typo? outside the repo? not committed yet?) and re-record with a scope that matches, or \`reverse\` this one.`);
+          return;
+        }
         console.log(`scope ${row.scope.join(", ")} covers ${n} tracked file${n === 1 ? "" : "s"} — a reversal will flag all ${n} to re-check.`);
         // A bare top-level directory (src/, lib/, .) is the canonical too-broad scope: it flags every
         // file under it on reversal, most of which never touched the decision (sim: ~1 in 4 did).
@@ -685,7 +700,8 @@ async function main(argv) {
     case "reject": return setStatus(r, need(r), pos[0], "rejected");
     case "governing": {
       const rows = need(r), f = pos[0] || "";
-      if (missingFile(r, f)) { console.log(`no such file in this repo: ${f} — check the path; "ungoverned" would be a misleading answer for a path that does not exist`); return; }
+      const prob = fileProblem(r, f);
+      if (prob) { console.log(`${prob}. Not answering "ungoverned" — that would read as "clear to proceed".`); return; }
       const g = governing(rows, rel(r, f)); g.length ? g.forEach((d) => console.log(line(d))) : console.log("ungoverned"); return;
     }
     case "stale": { // the guard: exit 1 on stale, 0 clean, never fails closed (the ledger is local)
@@ -930,7 +946,8 @@ function mcp(f = {}) {
         return live.length ? live.map((d) => `[${d.id}] ${d.decision}${d.why ? `\n  why: ${d.why}` : ""}${d.scope?.length ? `\n  scope: ${d.scope.join(", ")}` : ""}`).join("\n") : "No decisions in force.";
       case "governing": {
         if (!a.file) return "file is required.";
-        if (missingFile(r, a.file)) return `No such file in this repo: ${a.file}. Check the path — I am not answering "ungoverned", because that would tell you the file is clear when it does not exist.`;
+        const prob = fileProblem(r, a.file);
+        if (prob) return `${prob}. I am not answering "ungoverned", because that would tell you the file is clear when I cannot see it.`;
         const g = governing(rows || [], rel(r, a.file));
         return g.length ? `Decisions governing ${a.file} — honor these:\n` + g.map((d) => `[${d.id}] ${d.decision}${d.why ? ` (why: ${d.why})` : ""}`).join("\n") : `No decision governs ${a.file}.`;
       }
@@ -942,6 +959,7 @@ function mcp(f = {}) {
         const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision, why: a.why || "", scope });
         if (!scope.length) return `Recorded ${row.id}, but with NO scope it governs nothing and a reversal will flag nothing. Add scope to make it enforceable.`;
         const n = trackedFiles(r).filter((x) => scopeHits(scope, x)).length;
+        if (!n) return `Recorded ${row.id}, but its scope (${scope.join(", ")}) matches NO tracked file in this repo — so it governs nothing and a reversal will flag nothing. Check the path (typo? outside the repo? not committed yet?) and record it again with a scope that matches, or reverse this one.`;
         return `Recorded ${row.id}. Commit ${LEDGER} to make it bind for everyone. Scope covers ${n} tracked file(s) — a reversal will flag all ${n} to re-check.`;
       }
       case "reverse": {
@@ -1276,6 +1294,17 @@ function selfcheck() {
     ok(run("src/real.ts") === "ungoverned", "governing on a real but ungoverned file still says 'ungoverned'");
     writeFileSync(join(dir, "src", "brandnew.ts"), "b");  // exists, untracked: NOT missing
     ok(run("src/brandnew.ts") === "ungoverned", "a new untracked file is 'ungoverned', not 'no such file'");
+    // Outside the repo is not "ungoverned" either — this ledger says nothing about it, and
+    // "ungoverned" reads as "clear to proceed". `relative()` yields a bare ".." for the parent,
+    // which an early version of this check missed.
+    ok(/outside this repo/.test(run("/etc/passwd")), "an absolute path outside the repo is refused, not called 'ungoverned'");
+    ok(/outside this repo/.test(run("..")), "the parent directory is refused (bare '..', not '../')");
+    ok(/no file given/.test(run("")), "governing with no path says so instead of 'ungoverned'");
+    // A scope that matches nothing records a decision that looks in force and can never fire.
+    const dec = (sc) => spawnSync(process.execPath, [SELF, "decide", "X not Y", "--why", "w", "--scope", sc], { cwd: dir, encoding: "utf8" }).stdout;
+    ok(/matches NO tracked file/.test(dec("srcc/")), "decide warns when the scope is a typo that matches nothing");
+    ok(/matches NO tracked file/.test(dec("/etc/")), "decide warns when the scope is outside the repo");
+    ok(/covers 1 tracked file/.test(dec("src/real.ts")), "decide still reports normally for a scope that matches");
     rmSync(dir, { recursive: true, force: true });
   }
 
