@@ -184,3 +184,10 @@
   why: Cursor's Hooks panel showed our Claude Code entries remapped to sessionStart/preToolUse/stop. hook() matched only Claude's PascalCase names, so under Cursor it exited 0 silently every time. Detecting the dialect means anyone who already ran install for Claude Code gets Cursor push with no extra config. The wrapper also bakes an absolute node path, because a GUI editor inherits no shell PATH and bare node is missing for anyone on nvm/fnm/asdf.
   scope:
     - trailstone.mjs
+- id: d_4dd3771c
+  at: 2026-09-19T08:06:33.932Z
+  by: vishwamdhavale
+  decision: install writes the absolute node binary into every generated hook command, and wires Cursor hooks when the USER has Cursor rather than only when the repo already does
+  why: "A cold simulation — fresh HOME, installed from the publish tarball — found two things a machine with trailstone already set up can never surface: a brand-new repo has no .cursor/, so a fresh Cursor user got no push at all; and every generated command said bare 'node', which a GUI editor cannot resolve because it inherits no shell PATH (true for anyone on nvm/fnm/asdf). Both verified under env -i."
+  scope:
+    - trailstone.mjs

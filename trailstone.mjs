@@ -589,6 +589,13 @@ const fileProblem = (r, f) => {
 };
 
 
+// The absolute node that ran `install`, resolved through realpath: a version manager's `which
+// node` can be an ephemeral per-shell symlink (fnm_multishells/<pid>/bin/node) that dies with the
+// shell. Hooks are launched by GUI editors, which inherit no shell PATH — bare `node` is simply
+// missing for anyone on nvm/fnm/asdf, and the hook then fails silently, which is the one failure
+// mode this tool refuses. Quoted at every call site.
+const NODE_ABS = (() => { try { return realpathSync(process.execPath); } catch { return process.execPath; } })().replace(/\\/g, "/");
+
 // ── Cursor hooks ──────────────────────────────────────────────────────────────
 // Cursor ships its own hook system (.cursor/hooks.json), but with ONE constraint that shapes
 // everything: `preToolUse` can only send `agent_message` when it DENIES the tool call. There is
@@ -1170,9 +1177,7 @@ function writeCursorHooks(r) {
   // is frequently missing for anyone using nvm/fnm/asdf — which is most JS developers. Use
   // realpath, because a version manager's `which node` can be an ephemeral per-shell symlink
   // (fnm_multishells/<pid>/bin/node) that vanishes with the shell that made it.
-  let nodeBin = process.execPath;
-  try { nodeBin = realpathSync(process.execPath); } catch {}
-  const NODE_CMD = nodeBin.replace(/\\/g, "/");
+  const nodeBin = NODE_ABS, NODE_CMD = NODE_ABS;
   writeFileSync(wrapper, win
     ? `@echo off\r\nset "NODE=${nodeBin}"\r\nif not exist "%NODE%" set "NODE=node"\r\n"%NODE%" "${SELF_CMD}" cursor-hook\r\n`
     : `#!/bin/sh\n# written by trailstone install — see ${LEDGER}\nNODE="${NODE_CMD}"\n[ -x "$NODE" ] || NODE=node\nexec "$NODE" "${SELF_CMD}" cursor-hook\n`);
@@ -1241,7 +1246,7 @@ function install(f = {}) {
   s.hooks = s.hooks || {};
   for (const [ev, matcher] of [["SessionStart"], ["UserPromptSubmit"], ["PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"], ["Stop"]]) {
     s.hooks[ev] = s.hooks[ev] || [];
-    if (!s.hooks[ev].some((g) => (g.hooks || []).some((h) => (h.command || "").includes(basename(SELF))))) s.hooks[ev].push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `node "${SELF_CMD}" hook` }] });
+    if (!s.hooks[ev].some((g) => (g.hooks || []).some((h) => (h.command || "").includes(basename(SELF))))) s.hooks[ev].push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `"${NODE_ABS}" "${SELF_CMD}" hook` }] });
   }
   mkdirSync(dirname(st), { recursive: true }); writeFileSync(st, JSON.stringify(s, null, 2));
   console.log(`hooks → ${st}`);
@@ -1249,12 +1254,15 @@ function install(f = {}) {
   if (r) {
     const pp = join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push");
     if (existsSync(pp)) console.log(`pre-push exists at ${pp} — add: node "${SELF_CMD}" stale`);
-    else { mkdirSync(dirname(pp), { recursive: true }); writeFileSync(pp, `#!/bin/sh\nexec node "${SELF_CMD}" stale\n`); chmodSync(pp, 0o755); console.log(`pre-push → ${pp}`); }
+    else { mkdirSync(dirname(pp), { recursive: true }); writeFileSync(pp, `#!/bin/sh\nexec "${NODE_ABS}" "${SELF_CMD}" stale\n`); chmodSync(pp, 0o755); console.log(`pre-push → ${pp}`); }
     if (f["no-rules"]) console.log("skipped the agent rules file (--no-rules)");
     else writeRules(r);
     // Independent of --no-rules: that flag is about not writing prose into the repo. The Cursor
     // hooks are the PUSH surface, and someone who declines a rules file still wants those.
-    if (existsSync(join(r, ".cursor"))) writeCursorHooks(r);
+    // A brand-new repo has no .cursor/ yet, so keying off that gave a fresh Cursor user NO push
+    // at all — the exact case a machine with Trailstone already set up can never surface. Key off
+    // the user having Cursor (~/.cursor) as well as this repo already using it.
+    if (existsSync(join(r, ".cursor")) || existsSync(join(homedir(), ".cursor"))) writeCursorHooks(r);
   } else {
     // Run outside a repo, install used to write the hooks and silently skip the pre-push
     // guard — leaving the advisory half working and the ENFORCING half absent, with nothing
@@ -1421,10 +1429,13 @@ function selfcheck() {
     const cfg = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
     const cmds = Object.values(cfg.hooks || {}).flat().flatMap((g) => g.hooks || []).map((h) => h.command || "");
     ok(cmds.length === 4, `install writes all four hooks (got ${cmds.length})`);
-    ok(cmds.every((c) => /^node "/.test(c)), `hook commands quote the script path (got: ${cmds[0]})`);
+    // Both paths quoted, and node given ABSOLUTELY: a GUI editor inherits no shell PATH, so bare
+    // `node` is missing for anyone on nvm/fnm/asdf and the hook fails silently.
+    ok(cmds.every((c) => /^"[^"]+" "[^"]+" hook$/.test(c)), `hook commands quote both the node binary and the script path (got: ${cmds[0]})`);
+    ok(cmds.every((c) => isAbsolute(c.split('" "')[0].replace(/^"/, ""))), `the node binary is an absolute path, not bare "node" (got: ${cmds[0]})`);
     ok(cmds.every((c) => !c.includes("\\")), "hook commands contain no backslashes (git-bash on Windows)");
     const pp = readFileSync(join(dir, ".git", "hooks", "pre-push"), "utf8");
-    ok(/exec node "/.test(pp) && !pp.includes("\\"), "pre-push quotes the path and uses forward slashes");
+    ok(/^exec "[^"]+" "[^"]+" stale$/m.test(pp) && !pp.includes("\\"), "pre-push quotes both paths, absolute node, forward slashes");
     // …and doctor must SEE what install wrote. A regex over the settings once missed the
     // quoted command and reported 0/4 while all four were live — a false "not watching"
     // in the one command whose entire job is answering "is it watching?".
@@ -1520,6 +1531,19 @@ function selfcheck() {
         `hooks.json command is a repo-relative SCRIPT PATH, not a command line (got ${JSON.stringify(cmds)})`);
       const wrap = join(d4, ".cursor", "hooks", process.platform === "win32" ? "trailstone.cmd" : "trailstone.sh");
       ok(existsSync(wrap), "install writes the wrapper script the hooks.json points at");
+      // A brand-new repo has no .cursor/ — keying the Cursor hooks off that gave a fresh Cursor
+      // user no push at all. The check is now "does this USER have Cursor", which a machine with
+      // Trailstone already installed can never surface; only a cold install does.
+      {
+        const fresh = join(tmpdir(), `trailstone-fresh-${Date.now()}`), fhome = join(fresh, "home");
+        mkdirSync(join(fresh, "repo", "src"), { recursive: true }); mkdirSync(join(fhome, ".cursor"), { recursive: true });
+        const fr = join(fresh, "repo"), fg = (...a) => git(a, fr);
+        fg("init", "-q"); fg("config", "user.email", "t@t"); fg("config", "user.name", "t");
+        writeFileSync(join(fr, "src", "a.ts"), "a"); fg("add", "."); fg("commit", "-qm", "w");
+        spawnSync(process.execPath, [SELF, "install", "--no-rules"], { cwd: fr, encoding: "utf8", env: { ...process.env, HOME: fhome, USERPROFILE: fhome } });
+        ok(existsSync(join(fr, ".cursor", "hooks.json")), "a repo with NO .cursor/ still gets Cursor hooks when the user has Cursor");
+        rmSync(fresh, { recursive: true, force: true });
+      }
       // Cursor imports Claude Code's hook entries and calls them with ITS event names. The same
       // `trailstone.mjs hook` entry therefore has to answer in both dialects, or it exits 0
       // silently in Cursor forever — which is exactly what it did.
