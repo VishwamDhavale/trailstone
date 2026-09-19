@@ -1142,7 +1142,6 @@ function writeRules(r) {
     const c = join(r, ".cursor", "rules", "trailstone.mdc");
     if (existsSync(c)) console.log(`${c} exists — left alone`);
     else { mkdirSync(dirname(c), { recursive: true }); writeFileSync(c, `---\nalwaysApply: true\n---\n\n${block}\n`); console.log(`wrote ${c} (Cursor)`); }
-    writeCursorHooks(r);
   }
 }
 
@@ -1153,12 +1152,22 @@ function writeCursorHooks(r) {
   const p = join(r, ".cursor", "hooks.json");
   const cfg = readJson(p, null) || { version: 1, hooks: {} };
   cfg.version = cfg.version || 1; cfg.hooks = cfg.hooks || {};
-  const cmd = `node "${SELF_CMD}" cursor-hook`;
+  // Cursor's `command` is a PATH TO A SCRIPT, relative to the repo root — not a shell command
+  // line. Writing `node "<abs>" cursor-hook` there loads nothing, silently, and the Hooks tab
+  // stays empty with no error. So drop a tiny wrapper in the repo and point at that.
+  const win = process.platform === "win32";
+  const rel = win ? ".cursor/hooks/trailstone.cmd" : ".cursor/hooks/trailstone.sh";
+  const wrapper = join(r, ".cursor", "hooks", basename(rel));
+  mkdirSync(dirname(wrapper), { recursive: true });
+  writeFileSync(wrapper, win
+    ? `@echo off\r\nnode "${SELF_CMD}" cursor-hook\r\n`
+    : `#!/bin/sh\n# written by trailstone install — see ${LEDGER}\nexec node "${SELF_CMD}" cursor-hook\n`);
+  if (!win) try { chmodSync(wrapper, 0o755); } catch {}
   let added = 0;
   for (const ev of ["sessionStart", "preToolUse"]) {
     cfg.hooks[ev] = cfg.hooks[ev] || [];
-    if (cfg.hooks[ev].some((h) => (h.command || "").includes(basename(SELF)))) continue;
-    cfg.hooks[ev].push({ command: cmd }); added++;
+    if (cfg.hooks[ev].some((h) => (h.command || "").includes("trailstone"))) continue;
+    cfg.hooks[ev].push({ command: rel }); added++;
   }
   if (!added) return console.log(`${p} already wired — left alone`);
   writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
@@ -1194,13 +1203,19 @@ function uninstall() {
     if (cfg?.hooks) {
       let n = 0;
       for (const ev of Object.keys(cfg.hooks)) {
-        const keep = (cfg.hooks[ev] || []).filter((h) => !(h.command || "").includes(basename(SELF)));
+        // Match on "trailstone", not basename(SELF): the entry points at our WRAPPER script
+        // (.cursor/hooks/trailstone.sh), never at trailstone.mjs directly.
+        const keep = (cfg.hooks[ev] || []).filter((h) => !/trailstone/.test(h.command || ""));
         n += (cfg.hooks[ev] || []).length - keep.length;
         if (keep.length) cfg.hooks[ev] = keep; else delete cfg.hooks[ev];
       }
       if (n) {
         if (!Object.keys(cfg.hooks).length) { rmSync(ch); console.log(`removed ${ch} (it held only our hooks)`); }
         else { writeFileSync(ch, JSON.stringify(cfg, null, 2) + "\n"); console.log(`removed ${n} Cursor hook${n === 1 ? "" : "s"} from ${ch}`); }
+        for (const w of ["trailstone.sh", "trailstone.cmd"]) {
+          const wp = join(r, ".cursor", "hooks", w);
+          if (existsSync(wp)) { rmSync(wp); console.log(`removed ${wp}`); }
+        }
       }
     }
   }
@@ -1223,6 +1238,9 @@ function install(f = {}) {
     else { mkdirSync(dirname(pp), { recursive: true }); writeFileSync(pp, `#!/bin/sh\nexec node "${SELF_CMD}" stale\n`); chmodSync(pp, 0o755); console.log(`pre-push → ${pp}`); }
     if (f["no-rules"]) console.log("skipped the agent rules file (--no-rules)");
     else writeRules(r);
+    // Independent of --no-rules: that flag is about not writing prose into the repo. The Cursor
+    // hooks are the PUSH surface, and someone who declines a rules file still wants those.
+    if (existsSync(join(r, ".cursor"))) writeCursorHooks(r);
   } else {
     // Run outside a repo, install used to write the hooks and silently skip the pre-push
     // guard — leaving the advisory half working and the ENFORCING half absent, with nothing
@@ -1475,6 +1493,23 @@ function selfcheck() {
       }
       const ss = JSON.parse(ch({ hook_event_name: "sessionStart", cwd: d4 }).stdout);
       ok(typeof ss.additional_context === "string" && /STALE/.test(ss.additional_context), "sessionStart injects context including the stale warning");
+
+      // Cursor's `command` is a PATH TO A SCRIPT relative to the repo root, not a shell command
+      // line. Writing `node "<abs>" cursor-hook` there loads NOTHING, silently — the Hooks tab
+      // just stays empty. Assert the shape and that the wrapper actually runs.
+      mkdirSync(join(d4, ".cursor"), { recursive: true });
+      spawnSync(process.execPath, [SELF, "install", "--no-rules"], { cwd: d4, encoding: "utf8", env: { ...process.env, HOME: d4, USERPROFILE: d4 } });
+      const hj = readJson(join(d4, ".cursor", "hooks.json"), {});
+      ok(hj.version === 1, "hooks.json carries the version field Cursor 3.x requires");
+      const cmds = Object.values(hj.hooks || {}).flat().map((h) => h.command);
+      ok(cmds.length === 2 && cmds.every((c) => /^\.cursor\/hooks\/trailstone\.(sh|cmd)$/.test(c)),
+        `hooks.json command is a repo-relative SCRIPT PATH, not a command line (got ${JSON.stringify(cmds)})`);
+      const wrap = join(d4, ".cursor", "hooks", process.platform === "win32" ? "trailstone.cmd" : "trailstone.sh");
+      ok(existsSync(wrap), "install writes the wrapper script the hooks.json points at");
+      if (process.platform !== "win32") {
+        const viaWrapper = spawnSync(wrap, [], { cwd: d4, input: JSON.stringify(W("src/a.ts", "wrapconv")), encoding: "utf8" });
+        ok(viaWrapper.status === 0 && JSON.parse(viaWrapper.stdout).permission === "deny", "the wrapper script runs and denies a stale write, exactly as Cursor invokes it");
+      }
       rmSync(d4, { recursive: true, force: true });
     }
     // A scope that matches nothing records a decision that looks in force and can never fire.

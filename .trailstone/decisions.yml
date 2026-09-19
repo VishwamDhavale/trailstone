@@ -170,3 +170,10 @@
     - trailstone.mjs
     - README.md
     - VISION.md
+- id: d_faa243a1
+  at: 2026-09-19T07:28:59.849Z
+  by: vishwamdhavale
+  decision: The Cursor hooks.json command is a repo-relative path to a wrapper script trailstone writes, never a shell command line
+  why: Cursor's command field is a path to a script, not a command string. Writing 'node "<abs>" cursor-hook' loaded NOTHING and left the Hooks tab empty with no error — found only by opening Cursor. install now writes .cursor/hooks/trailstone.sh (or .cmd on Windows) and points at it, and wires the hooks independently of --no-rules, which is about prose in the repo, not about the push surface.
+  scope:
+    - trailstone.mjs
