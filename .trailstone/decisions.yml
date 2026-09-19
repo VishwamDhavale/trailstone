@@ -147,3 +147,10 @@
   why: "decide accepted --scope srcc/ and /etc/ as ordinary successes: the decision lands in the ledger, reads as in force, governs nothing and can never flag anything on reversal. For a tool whose premise is that a decision knows what it governs, a silently dead decision is the worst possible entry. The no-scope case already warned; zero-match is the same outcome and now warns in the same words, in the CLI and over MCP."
   scope:
     - trailstone.mjs
+- id: d_0daf48bc
+  at: 2026-09-19T06:06:01.701Z
+  by: vishwamdhavale
+  decision: Staleness is keyed by file AND reversal, so every reversal governing a file is reported
+  why: "Two reversed decisions governing one file reported only the last: you re-check the single cause shown, validate, the flag clears, and the file still rests on the other reversal — shipping green. 'Names exactly which work is suspect' has to mean every cause. validate now compares file+reversal pairs too, so clearing one cause does not read as clearing the file."
+  scope:
+    - trailstone.mjs

@@ -223,7 +223,11 @@ export function stale(r, rows = load(r)) {
       if (last == null || last >= at) continue; // touched since → addressed
       const ok = validations.some((v) => (v.decisionId === d.id || v.decisionId === old.id) && epoch(v.at) >= at && (!v.scope?.length || scopeHits(v.scope, f)));
       if (ok) continue;
-      out.set(f, { file: f, decisionId: old.id, replacedById: d.id, was: old.decision, now: d.decision, by: d.by, at: d.at });
+      // Keyed by file AND reversal: two reversed decisions can govern the same file, and keying
+      // by file alone silently dropped all but the last — you re-check against the one cause you
+      // were shown, validate, the flag clears, and the file still rests on the other reversal.
+      // "Names exactly which work is suspect" has to mean every cause, not the most recent one.
+      out.set(`${f}\u0000${d.id}`, { file: f, decisionId: old.id, replacedById: d.id, was: old.decision, now: d.decision, by: d.by, at: d.at });
     }
   }
   return [...out.values()];
@@ -651,6 +655,11 @@ async function main(argv) {
       const rawRef = cmd === "reverse" ? pos.shift() : f.supersedes;
       const text = pos.join(" ");
       if (!text) { console.error(`usage: ${cmd} ${cmd === "reverse" ? "<id|phrase> " : ""}"<decision>" --why "<why>" --scope a,b`); process.exit(2); }
+      // An EMPTY ref is falsy, so `reverse "" "new text"` used to skip the resolve entirely and
+      // write a plain decision: the old one stayed IN FORCE, nothing went stale, and the ledger
+      // held two contradictory rules while the user believed the reversal had landed. `reverse`
+      // without a target is never meaningful — refuse it.
+      if (cmd === "reverse" && !rawRef) { console.error(`reverse needs the decision it replaces: reverse <id|unique phrase> "<new decision>"\nRun \`list\` to see what is in force. To record a NEW decision instead, use \`decide\`.`); process.exit(2); }
       let supersedes = rawRef;
       if (rawRef) {
         const res = resolveRef(rawRef, inForce(rows).filter((x) => (x.kind ?? "decision") === "decision"));
@@ -691,8 +700,24 @@ async function main(argv) {
       const res = resolveRef(pos[0], rows.filter((x) => (x.kind ?? "decision") === "decision"));
       if (res.error) { console.error("usage: validate <decisionId|phrase> [--scope a,b] [--wrong]\n  " + res.error + "\n  --wrong: this flag was a FALSE POSITIVE — the file never rested on that decision (clears it the same way, but counts against precision in `stats`)"); process.exit(2); }
       const id = res.id;
+      // Measure what the validation ACTUALLY clears, before and after. A typo in --scope used to
+      // print a confident "holds" while the flag stayed up: you believe it is handled, the push
+      // still fails. Counting is better than checking the path, because it catches every reason a
+      // validation fails to clear — wrong decision, wrong scope, path that is not in the repo.
+      // Compare CAUSES (file + the reversal that flagged it), not file names: one file can be
+      // flagged by two different reversals, so counting file names both double-counts and hides
+      // the fact that one cause was cleared while another still stands.
+      const key = (x) => `${x.file}\u0000${x.replacedById}`;
+      const before = stale(r);
       const row = append(r, { kind: "validation", id: newId("v"), at: new Date().toISOString(), by: who(r), decisionId: id, scope, ...(f.wrong ? { wrong: true } : {}) });
-      console.log(`${row.id}: re-checked against ${id}${scope.length ? ` for ${scope.join(", ")}` : ""} — ${f.wrong ? "FALSE POSITIVE (never rested on it)." : "holds."}`); return;
+      const after = stale(r), afterKeys = new Set(after.map(key));
+      const cleared = [...new Set(before.filter((x) => !afterKeys.has(key(x))).map((x) => x.file))];
+      const left = [...new Set(after.map((x) => x.file))];
+      console.log(`${row.id}: re-checked against ${id}${scope.length ? ` for ${scope.join(", ")}` : ""} — ${f.wrong ? "FALSE POSITIVE (never rested on it)." : "holds."}`);
+      if (cleared.length) console.log(`cleared ${cleared.length} stale flag${cleared.length === 1 ? "" : "s"}: ${cleared.join(", ")}`);
+      else if (before.length) console.log(`⚠ cleared NOTHING — still stale: ${left.join(", ")}.\n  Check the decision id and the --scope path against \`stale\`; a validation only clears the file+reversal pairs it actually names.`);
+      else console.log(`(nothing was stale, so this clears nothing — recorded as a re-check.)`);
+      return;
     }
     case "list": { const rows = need(r); for (const d of (f.all ? rows.filter((x) => (x.kind ?? "decision") === "decision") : inForce(rows))) console.log(`${d.id}  ${d.at.slice(0, 10)}  ${d.by}${d.status ? ` [${d.status}]` : ""}${d.supersedes ? ` ⟵ ${d.supersedes}` : ""}\n    ${d.decision}${d.why ? `\n    why: ${d.why}` : ""}${d.scope?.length ? `\n    scope: ${d.scope.join(", ")}` : ""}`); return; }
     case "proposed": { const p = proposed(need(r)); if (!p.length) console.log("nothing proposed"); for (const d of p) console.log(`${d.id}  ${d.decision}${d.supersedes ? `  (reverses ${d.supersedes})` : ""}${d.scope?.length ? `  [${d.scope.join(", ")}]` : ""}`); return; }
@@ -1305,6 +1330,36 @@ function selfcheck() {
     ok(/matches NO tracked file/.test(dec("srcc/")), "decide warns when the scope is a typo that matches nothing");
     ok(/matches NO tracked file/.test(dec("/etc/")), "decide warns when the scope is outside the repo");
     ok(/covers 1 tracked file/.test(dec("src/real.ts")), "decide still reports normally for a scope that matches");
+
+    // `reverse` with an EMPTY ref silently degraded into `decide`: the old decision stayed in
+    // force, nothing went stale, and the ledger held two contradictory rules.
+    const rv = (ref) => spawnSync(process.execPath, [SELF, "reverse", ref, "Cookies, not JWT", "--why", "w"], { cwd: dir, encoding: "utf8" });
+    const empty = rv("");
+    ok(empty.status === 2 && /needs the decision it replaces/.test(empty.stderr), "reverse with an empty ref is refused, not silently turned into a decide");
+    ok(!/supersedes/.test(readFileSync(join(dir, LEDGER), "utf8").split("\n").slice(-6).join("\n")), "the refused reverse wrote nothing to the ledger");
+
+    // Two reversed decisions can govern ONE file. Keying staleness by file alone dropped all but
+    // the last: you re-check the cause you were shown, validate, the flag clears, and the file
+    // still rests on the other reversal.
+    {
+      const d2 = join(tmpdir(), `trailstone-two-${Date.now()}`); mkdirSync(join(d2, "src"), { recursive: true });
+      const gg = (...a) => git(a, d2);
+      gg("init", "-q"); gg("config", "user.email", "t@t"); gg("config", "user.name", "t");
+      writeFileSync(join(d2, "src", "shared.ts"), "a"); gg("add", ".");
+      execFileSync("git", ["commit", "-q", "-m", "w", "--date", "2020-01-01T00:00:00Z"], { cwd: d2, env: { ...process.env, GIT_COMMITTER_DATE: "2020-01-01T00:00:00Z" } });
+      mkdirSync(join(d2, ".trailstone")); writeFileSync(join(d2, LEDGER), HEADER);
+      const run2 = (...a) => spawnSync(process.execPath, [SELF, ...a], { cwd: d2, encoding: "utf8" }).stdout;
+      const idOf = (o) => (o.match(/d_[a-f0-9]+/) || [])[0];
+      const A = idOf(run2("decide", "Auth uses JWT, not cookies", "--why", "w", "--scope", "src/shared.ts"));
+      const B = idOf(run2("decide", "Logging is JSON, not plaintext", "--why", "w", "--scope", "src/shared.ts"));
+      run2("reverse", A, "Auth uses cookies", "--why", "w"); run2("reverse", B, "Logging is plaintext", "--why", "w");
+      const st = stale(d2);
+      ok(st.length === 2, `both reversals governing one file are reported (got ${st.length})`);
+      run2("validate", A, "--scope", "src/shared.ts");
+      const left = stale(d2);
+      ok(left.length === 1 && left[0].was.startsWith("Logging"), "validating one cause leaves the other still flagged");
+      rmSync(d2, { recursive: true, force: true });
+    }
     rmSync(dir, { recursive: true, force: true });
   }
 
