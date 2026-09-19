@@ -563,6 +563,16 @@ async function capture(r, rows, transcriptPath) {
   logCapture("OK", `${basename(r)} ${decisions.length} decisions, ${(contradicted || []).length} contradicted, $${(cost || 0).toFixed(4)}`);
 }
 
+// "ungoverned" and "that path is not in this repo" are different answers, and conflating them
+// is dangerous: an agent that mistypes or guesses a path is told it is clear to proceed. A file
+// that exists on disk but is untracked is fine (new file, may be covered by a directory scope);
+// one that is neither on disk nor tracked does not exist, and we say so.
+const missingFile = (r, f) => {
+  if (!f) return false;
+  try { if (existsSync(isAbsolute(f) ? f : join(r, f))) return false; } catch { return false; }
+  try { return !git(["ls-files", "--error-unmatch", "--", f], r); } catch { return true; }
+};
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 const SELF = fileURLToPath(import.meta.url);
 // Generated commands land in a shell: Claude Code's hook runner, and git's bash for the
@@ -673,7 +683,11 @@ async function main(argv) {
     case "proposed": { const p = proposed(need(r)); if (!p.length) console.log("nothing proposed"); for (const d of p) console.log(`${d.id}  ${d.decision}${d.supersedes ? `  (reverses ${d.supersedes})` : ""}${d.scope?.length ? `  [${d.scope.join(", ")}]` : ""}`); return; }
     case "ratify": return setStatus(r, need(r), pos[0], null);
     case "reject": return setStatus(r, need(r), pos[0], "rejected");
-    case "governing": { const rows = need(r); const g = governing(rows, rel(r, pos[0] || "")); g.length ? g.forEach((d) => console.log(line(d))) : console.log("ungoverned"); return; }
+    case "governing": {
+      const rows = need(r), f = pos[0] || "";
+      if (missingFile(r, f)) { console.log(`no such file in this repo: ${f} — check the path; "ungoverned" would be a misleading answer for a path that does not exist`); return; }
+      const g = governing(rows, rel(r, f)); g.length ? g.forEach((d) => console.log(line(d))) : console.log("ungoverned"); return;
+    }
     case "stale": { // the guard: exit 1 on stale, 0 clean, never fails closed (the ledger is local)
       const st = guard(r);
       if (!st.length) { console.log("trailstone: clean."); return; }
@@ -916,6 +930,7 @@ function mcp(f = {}) {
         return live.length ? live.map((d) => `[${d.id}] ${d.decision}${d.why ? `\n  why: ${d.why}` : ""}${d.scope?.length ? `\n  scope: ${d.scope.join(", ")}` : ""}`).join("\n") : "No decisions in force.";
       case "governing": {
         if (!a.file) return "file is required.";
+        if (missingFile(r, a.file)) return `No such file in this repo: ${a.file}. Check the path — I am not answering "ungoverned", because that would tell you the file is clear when it does not exist.`;
         const g = governing(rows || [], rel(r, a.file));
         return g.length ? `Decisions governing ${a.file} — honor these:\n` + g.map((d) => `[${d.id}] ${d.decision}${d.why ? ` (why: ${d.why})` : ""}`).join("\n") : `No decision governs ${a.file}.`;
       }
@@ -1245,6 +1260,23 @@ function selfcheck() {
   {
     const pkg = JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8"));
     ok(VERSION === pkg.version, `VERSION (${VERSION}) matches package.json (${pkg.version})`);
+  }
+
+  // "ungoverned" for a path that does not exist tells an agent it is clear to proceed on a file
+  // it just mistyped. Found live: Cursor asked about src/App.tsx in a Next.js repo and got
+  // "ungoverned"; only its own filesystem check caught that the file was not there.
+  {
+    const dir = join(tmpdir(), `trailstone-miss-${Date.now()}`); mkdirSync(join(dir, "src"), { recursive: true });
+    const g = (...a) => git(a, dir);
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t");
+    writeFileSync(join(dir, "src", "real.ts"), "a"); g("add", "."); g("commit", "-qm", "w");
+    mkdirSync(join(dir, ".trailstone")); writeFileSync(join(dir, LEDGER), HEADER);
+    const run = (f) => spawnSync(process.execPath, [SELF, "governing", f], { cwd: dir, encoding: "utf8" }).stdout.trim();
+    ok(/no such file/.test(run("src/nope.ts")), "governing on a nonexistent path says so, not 'ungoverned'");
+    ok(run("src/real.ts") === "ungoverned", "governing on a real but ungoverned file still says 'ungoverned'");
+    writeFileSync(join(dir, "src", "brandnew.ts"), "b");  // exists, untracked: NOT missing
+    ok(run("src/brandnew.ts") === "ungoverned", "a new untracked file is 'ungoverned', not 'no such file'");
+    rmSync(dir, { recursive: true, force: true });
   }
 
   // `install` outside a repo writes the hooks but CANNOT write the pre-push guard. It used to

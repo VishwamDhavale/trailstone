@@ -133,3 +133,10 @@
   why: "Measured: a trivial 2-assistant-row transcript took 45s end to end because the judge's own claude -p boots a session before answering, and 90s had already produced a real ETIMEDOUT. The Stop worker is detached, so a slow judge costs the session nothing — a missed capture costs a decision."
   scope:
     - trailstone.mjs
+- id: d_287c8fca
+  at: 2026-09-19T05:52:07.959Z
+  by: vishwamdhavale
+  decision: governing distinguishes a nonexistent path from an ungoverned one, in both the CLI and MCP
+  why: Cursor asked about src/App.tsx in a Next.js repo and got 'ungoverned' — the same answer a real, clear file gets. An agent that mistypes or guesses a path is told it may proceed. A file on disk but untracked stays 'ungoverned', since a directory scope may still cover it.
+  scope:
+    - trailstone.mjs
