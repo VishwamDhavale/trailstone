@@ -731,6 +731,11 @@ async function main(argv) {
     }
     case "stale": { // the guard: exit 1 on stale, 0 clean, never fails closed (the ledger is local)
       const st = guard(r);
+      // "clean" must mean "I checked and nothing is stale", never "I had nothing to check".
+      // With no ledger this printed "clean" and exited 0 — so a CI gate (`trailstone stale`) on a
+      // repo whose ledger was never committed goes green forever, gating nothing, silently.
+      // Still exit 0: a repo that never opted in must never be blocked. Just don't call it clean.
+      if (!load(r)) { console.log(`no ledger here (${LEDGER} not found) — nothing to gate. This is NOT "clean": if you expected decisions, the ledger was never committed, or you are in the wrong directory.`); return; }
       if (!st.length) { console.log("trailstone: clean."); return; }
       console.error(renderStale(st)); process.exit(1);
     }
@@ -904,7 +909,10 @@ function doctor() {
       .filter((k) => (k.command || "").includes(basename(SELF)) && /\bhook\b\s*$/.test(k.command || "")).length;
   } catch { return 0; } })();
   say(n >= 4, n >= 4 ? "all 4 Claude Code hooks installed" : `only ${n}/4 hooks installed — run \`install\``);
-  say(existsSync(join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push")), "pre-push guard installed");
+  // Phrase per state: "✗ pre-push guard installed" reads as installed. doctor is the one command
+  // whose entire job is telling you the truth about your setup, so its negatives must read negative.
+  const pp = existsSync(join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push"));
+  say(pp, pp ? "pre-push guard installed" : "NO pre-push guard — nothing blocks a stale push here; run `trailstone install` inside this repo");
 
   const last = (() => { try { return readFileSync(captureLog(), "utf8").trim().split("\n").at(-1); } catch { return null; } })();
   console.log(last ? `  --  last capture judge run: ${last}` : "  --  the capture judge has never run here or anywhere");
@@ -1325,6 +1333,17 @@ function selfcheck() {
     ok(/outside this repo/.test(run("/etc/passwd")), "an absolute path outside the repo is refused, not called 'ungoverned'");
     ok(/outside this repo/.test(run("..")), "the parent directory is refused (bare '..', not '../')");
     ok(/no file given/.test(run("")), "governing with no path says so instead of 'ungoverned'");
+    // A gate must never report "clean" about a repo whose ledger it cannot see.
+    {
+      const d3 = join(tmpdir(), `trailstone-noledger-${Date.now()}`); mkdirSync(join(d3, "src"), { recursive: true });
+      const gg = (...a) => git(a, d3);
+      gg("init", "-q"); gg("config", "user.email", "t@t"); gg("config", "user.name", "t");
+      writeFileSync(join(d3, "src", "a.ts"), "a"); gg("add", "."); gg("commit", "-qm", "w");
+      const p3 = spawnSync(process.execPath, [SELF, "stale"], { cwd: d3, encoding: "utf8" });
+      ok(p3.status === 0, "stale on a repo with no ledger still exits 0 (never block an opt-out repo)");
+      ok(/no ledger here/.test(p3.stdout) && !/clean/.test(p3.stdout.replace(/NOT "clean"/, "")), "stale on a repo with no ledger does NOT report 'clean'");
+      rmSync(d3, { recursive: true, force: true });
+    }
     // A scope that matches nothing records a decision that looks in force and can never fire.
     const dec = (sc) => spawnSync(process.execPath, [SELF, "decide", "X not Y", "--why", "w", "--scope", sc], { cwd: dir, encoding: "utf8" }).stdout;
     ok(/matches NO tracked file/.test(dec("srcc/")), "decide warns when the scope is a typo that matches nothing");

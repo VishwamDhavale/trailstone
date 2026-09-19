@@ -154,3 +154,10 @@
   why: "Two reversed decisions governing one file reported only the last: you re-check the single cause shown, validate, the flag clears, and the file still rests on the other reversal — shipping green. 'Names exactly which work is suspect' has to mean every cause. validate now compares file+reversal pairs too, so clearing one cause does not read as clearing the file."
   scope:
     - trailstone.mjs
+- id: d_43149fe3
+  at: 2026-09-19T06:13:04.166Z
+  by: vishwamdhavale
+  decision: stale reports 'no ledger here' instead of 'clean' when there is no ledger, still exiting 0
+  why: "A CI gate (trailstone stale) on a repo whose ledger was never committed printed 'trailstone: clean.' and exited 0 — green forever, gating nothing, silently. Exit 0 stays, because a repo that never opted in must never be blocked; what changes is that a gate no longer claims to have checked something it could not see."
+  scope:
+    - trailstone.mjs
