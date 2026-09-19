@@ -191,3 +191,12 @@
   why: "A cold simulation — fresh HOME, installed from the publish tarball — found two things a machine with trailstone already set up can never surface: a brand-new repo has no .cursor/, so a fresh Cursor user got no push at all; and every generated command said bare 'node', which a GUI editor cannot resolve because it inherits no shell PATH (true for anyone on nvm/fnm/asdf). Both verified under env -i."
   scope:
     - trailstone.mjs
+- id: d_a85a0478
+  at: 2026-09-19T08:16:36.335Z
+  by: vishwamdhavale
+  decision: "Cursor push is proven on both routes: .cursor/hooks.json standalone, and Cursor importing Claude Code's hooks"
+  why: "The standalone route was the untested case a Cursor-only user depends on. Proven by instrumenting the wrapper so it could be distinguished from the imported hooks: it fired 16 times in one task and denied the stale write, with no AGENTS.md, no Cursor rules and no MCP server present, on grok-4.6. preToolUse fires on every tool call, so the hook exits before touching git for non-writes: 88ms, flat with repo size."
+  scope:
+    - trailstone.mjs
+    - README.md
+    - VISION.md

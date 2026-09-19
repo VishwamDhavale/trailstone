@@ -7,14 +7,16 @@ edits a governed file, unasked — verified live with every pull surface removed
 Cursor rules, no MCP server), so the agent had no way to ask: it was told, re-checked the file
 against the reversal, rewrote it, and declined to commit.
 
-Be precise about which path was proven, because they are not equally tested:
+Both routes are confirmed live, on two different models:
 
-- **Cursor importing your Claude Code hooks** — confirmed live. `hook` now detects which harness
-  is calling and answers in that dialect, so anyone who has run `install` for Claude Code gets
-  Cursor push with nothing further to do. This is the path the live test exercised.
-- **`.cursor/hooks.json`**, for Cursor users without Claude Code — written by `install`, unit
-  tested, and exercised end to end from the command line, but **never yet seen fire inside the
-  Cursor GUI.**
+- **`.cursor/hooks.json`** — the standalone path, for Cursor users with no Claude Code at all.
+  Proven by instrumenting the wrapper so it could be told apart from the imported hooks: it fired
+  16 times in one task (every tool call), denied the stale write, and the agent (grok-4.6) named
+  the reversal and fixed the file.
+- **Cursor importing Claude Code's hooks** — Cursor reads `~/.claude/settings.json` and calls
+  those entries under its own event names, so `hook` detects which harness is calling and answers
+  in that dialect. Anyone who has run `install` for Claude Code gets Cursor push with nothing
+  further to configure.
 
 Cursor can only reach an agent from `preToolUse` by *denying*, so a stale write is denied exactly
 once, carrying the reversal, and the retry proceeds. Merely-governed edits are never blocked.
@@ -51,8 +53,12 @@ on a machine where Trailstone was already installed. Simulating a stranger — e
 from the release tarball, a repo with no prior config — surfaced both immediately. A working setup
 hides exactly the defects a new user hits first.
 
-**Known limitation:** the live Cursor result is one run, one repo, one agent. The mechanism works;
-how reliably it works is not yet measured.
+`preToolUse` fires on *every* tool call, not just writes — 16 spawns in one task. The hook exits
+before touching git for anything that is not a write: **88 ms per call, flat with repo size**
+(measured on a 494-file repo).
+
+**Known limitation:** two runs, one repo. The mechanism works on both routes and two models; how
+reliably it works across real projects is not yet measured.
 
 ## 0.2.1
 

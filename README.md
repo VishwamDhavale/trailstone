@@ -196,8 +196,9 @@ the agent to pass its project path as the `repo` argument, which agents do recov
 
 **3. Cursor hooks — push, not pull.** If you have Cursor, `install` also writes
 `.cursor/hooks.json` (merging into any hooks you already have). Cursor additionally *imports*
-Claude Code's hooks and calls them under its own event names, which Trailstone answers too — so if
-you use both, push works with nothing extra to configure. `sessionStart` injects the
+Claude Code's hooks and calls them under its own event names, which Trailstone answers too — so
+push works whether or not you have Claude Code. Both routes are verified against a live Cursor
+agent. `sessionStart` injects the
 goal, the decisions in force and anything stale; `preToolUse` **denies a write to a stale file
 exactly once**, handing the agent the reversal, and allows the retry. That one-time deny is the
 only way Cursor lets a hook reach the agent before an edit — and it fires only on files that are
