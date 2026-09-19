@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.2.2
+
+**Trailstone now pushes into Cursor, not just Claude Code.** A reversed decision reaches a
+Cursor agent *before* it edits a governed file, unasked. Verified end to end with the pull
+surfaces removed — no `AGENTS.md`, no Cursor rules, no MCP server — so the agent had no way to
+ask: it was told, re-checked the file against the reversal, rewrote it, and declined to commit.
+
+The mechanism is not a new config. **Cursor imports Claude Code's hooks and calls them under its
+own event names**, so `hook` now detects which harness is calling and answers in that dialect —
+anyone who has run `install` for Claude Code gets Cursor push with nothing further to do.
+`install` also writes `.cursor/hooks.json` for Cursor users without Claude Code. Cursor can only
+reach an agent from `preToolUse` by *denying*, so a stale write is denied exactly once, carrying
+the reversal, and the retry proceeds; merely-governed edits are never blocked.
+
+**Fixed — three of these silently disabled enforcement**
+
+- **`install` outside a repo skipped the pre-push guard and said nothing.** The README told you to
+  run it in that order, so following the instructions left you with the advisory half and no gate.
+- **`stale` reported only ONE reversal per file.** Two reversed decisions governing one file: you
+  re-checked the cause you were shown, validated, the flag cleared — and the file still rested on
+  the other reversal. Keyed by file *and* reversal now.
+- **`stale` said "clean" when there was no ledger at all**, so a CI gate on a repo whose ledger was
+  never committed went green forever, gating nothing. It still exits 0 (a repo that never opted in
+  must never be blocked) but no longer claims to have checked.
+- `reverse` with an empty ref silently became `decide`: the old decision stayed in force, nothing
+  went stale, and two contradictory rules sat in the ledger. Refused now.
+- `validate` printed a confident "holds" while clearing nothing (a typo in `--scope`). It now
+  reports what it actually cleared, and says so when that is nothing.
+- `governing` answered "ungoverned" for a path that does not exist, a path outside the repo, and
+  no path at all — telling an agent it was clear to proceed on ground the tool could not see.
+- `decide` accepted a scope matching no tracked file as an ordinary success, recording a decision
+  that reads as in force and can never fire.
+- The capture judge's timeout was 90s; a trivial transcript already took 45s. Now 300s.
+- `doctor` printed `✗ pre-push guard installed` — a cross beside the word "installed".
+
+**Known limitation:** the Cursor result is one run, one repo, one agent. The mechanism works; how
+reliably it works is not yet measured.
+
 ## 0.2.1
 
 **Fixed**
