@@ -2,19 +2,24 @@
 
 ## 0.2.2
 
-**Trailstone now pushes into Cursor, not just Claude Code.** A reversed decision reaches a
-Cursor agent *before* it edits a governed file, unasked. Verified end to end with the pull
-surfaces removed — no `AGENTS.md`, no Cursor rules, no MCP server — so the agent had no way to
-ask: it was told, re-checked the file against the reversal, rewrote it, and declined to commit.
+**Push reaches Cursor, not just Claude Code.** A reversed decision arrives before a Cursor agent
+edits a governed file, unasked — verified live with every pull surface removed (no `AGENTS.md`, no
+Cursor rules, no MCP server), so the agent had no way to ask: it was told, re-checked the file
+against the reversal, rewrote it, and declined to commit.
 
-The mechanism is not a new config. **Cursor imports Claude Code's hooks and calls them under its
-own event names**, so `hook` now detects which harness is calling and answers in that dialect —
-anyone who has run `install` for Claude Code gets Cursor push with nothing further to do.
-`install` also writes `.cursor/hooks.json` for Cursor users without Claude Code. Cursor can only
-reach an agent from `preToolUse` by *denying*, so a stale write is denied exactly once, carrying
-the reversal, and the retry proceeds; merely-governed edits are never blocked.
+Be precise about which path was proven, because they are not equally tested:
 
-**Fixed — three of these silently disabled enforcement**
+- **Cursor importing your Claude Code hooks** — confirmed live. `hook` now detects which harness
+  is calling and answers in that dialect, so anyone who has run `install` for Claude Code gets
+  Cursor push with nothing further to do. This is the path the live test exercised.
+- **`.cursor/hooks.json`**, for Cursor users without Claude Code — written by `install`, unit
+  tested, and exercised end to end from the command line, but **never yet seen fire inside the
+  Cursor GUI.**
+
+Cursor can only reach an agent from `preToolUse` by *denying*, so a stale write is denied exactly
+once, carrying the reversal, and the retry proceeds. Merely-governed edits are never blocked.
+
+**Fixed — every one of these failed silently**
 
 - **`install` outside a repo skipped the pre-push guard and said nothing.** The README told you to
   run it in that order, so following the instructions left you with the advisory half and no gate.
@@ -24,6 +29,12 @@ the reversal, and the retry proceeds; merely-governed edits are never blocked.
 - **`stale` said "clean" when there was no ledger at all**, so a CI gate on a repo whose ledger was
   never committed went green forever, gating nothing. It still exits 0 (a repo that never opted in
   must never be blocked) but no longer claims to have checked.
+- **Every generated command said bare `node`** — the four Claude Code hooks, the pre-push guard,
+  the Cursor wrapper. A GUI editor inherits no shell PATH, and bare `node` is absent from a clean
+  one for anyone using nvm, fnm or asdf. They now carry the absolute node that ran `install`,
+  resolved through realpath, with a PATH fallback.
+- **A fresh Cursor user got no Cursor hooks at all**: `install` keyed off the repo already having a
+  `.cursor/` directory, which a new repo does not. It now keys off the user having Cursor.
 - `reverse` with an empty ref silently became `decide`: the old decision stayed in force, nothing
   went stale, and two contradictory rules sat in the ledger. Refused now.
 - `validate` printed a confident "holds" while clearing nothing (a typo in `--scope`). It now
@@ -35,8 +46,13 @@ the reversal, and the retry proceeds; merely-governed edits are never blocked.
 - The capture judge's timeout was 90s; a trivial transcript already took 45s. Now 300s.
 - `doctor` printed `✗ pre-push guard installed` — a cross beside the word "installed".
 
-**Known limitation:** the Cursor result is one run, one repo, one agent. The mechanism works; how
-reliably it works is not yet measured.
+**How the last two were found, because it is the useful part.** Everything above was first tested
+on a machine where Trailstone was already installed. Simulating a stranger — empty HOME, `npm i -g`
+from the release tarball, a repo with no prior config — surfaced both immediately. A working setup
+hides exactly the defects a new user hits first.
+
+**Known limitation:** the live Cursor result is one run, one repo, one agent. The mechanism works;
+how reliably it works is not yet measured.
 
 ## 0.2.1
 

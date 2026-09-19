@@ -114,11 +114,14 @@ Two harnesses have it today, and they are not the same shape:
 
 - **Claude Code** — `PreToolUse` returns `additionalContext` alongside an *allow*. The agent is
   told, nothing is blocked.
-- **Cursor** — `.cursor/hooks.json`. `sessionStart` injects `additional_context` freely, but
-  `preToolUse` can only reach the agent via `agent_message` **on a deny**. So Trailstone denies
-  exactly once, only when the file is genuinely *stale* — the same condition that already blocks
-  a push — and allows the retry. Merely-governed edits are never blocked, because that would be
-  new interference bought with no new safety.
+- **Cursor** — two routes, unequally proven. Cursor *imports* Claude Code's hook entries and
+  calls them under its own event names, so `hook` answers both dialects; that route is confirmed
+  live. For Cursor users without Claude Code, `install` writes `.cursor/hooks.json` — built and
+  tested from the command line, but not yet observed firing inside the Cursor GUI. Either way,
+  `sessionStart` injects `additional_context` freely while `preToolUse` can only reach the agent
+  via `agent_message` **on a deny**, so Trailstone denies exactly once, only when the file is
+  genuinely *stale* — the same condition that already blocks a push — and allows the retry.
+  Merely-governed edits are never blocked: that would be new interference bought with no safety.
 
 Codex, Windsurf and Claude Desktop are still pull-only. A shim that gets unasked pre-edit
 surfacing working in one of those is the most valuable contribution to this project.
