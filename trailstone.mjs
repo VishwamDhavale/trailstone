@@ -260,6 +260,23 @@ export function logFires(r, list, surface) {
   } catch {}
 }
 
+// A stale fire is the RARE event (a reversal caught something). The COMMON event is a decision
+// simply shown to keep the agent on course — and nothing counted it, so a repo that never went
+// stale (the healthy case) looked identical to one where the tool did nothing. This is the
+// denominator: how often a decision was actually put in front of someone, by which surface.
+// One JSON line per surfacing (not deduped — each is a distinct moment). Best-effort, never throws.
+const shownLog = () => process.env.TRAILSTONE_SHOWN_LOG || join(homedir(), ".trailstone", "surfaces.log");
+export function readShown() {
+  try { return readFileSync(shownLog(), "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; }
+}
+export function logShown(r, surface, n) {
+  try {
+    if (!n) return;
+    mkdirSync(dirname(shownLog()), { recursive: true });
+    appendFileSync(shownLog(), JSON.stringify({ at: new Date().toISOString(), repo: basename(r), surface, shown: n }) + "\n");
+  } catch {}
+}
+
 // How a fire turned out. Precedence: an explicit human verdict outranks the mechanical
 // signals (a file redone for other reasons must not mask a false positive).
 export function resolveFire(r, rows, fire) {
@@ -362,6 +379,7 @@ async function hook() {
     const g = renderGoal(rows);
     if (!g && !rv.decisions.length && !rv.proposed.length && !st.length) process.exit(0);
     logFires(r, st, "prompt");
+    logShown(r, "prompt", rv.decisions.length);
     return emit(event, "# Trailstone — relevant to this request\n" + [g, renderStale(st), renderRelevant(rv, "Relevant decisions in force")].filter(Boolean).join("\n\n"));
   }
   if (event === "PreToolUse") {
@@ -375,6 +393,7 @@ async function hook() {
     const rv = relevant(rows, { files: [f] }), st = stale(r, rows).filter((s) => s.file === f);
     if (!rv.decisions.length && !rv.proposed.length && !st.length) process.exit(0);
     logFires(r, st, "edit");
+    logShown(r, "edit", rv.decisions.length);
     return emit(event, `# Trailstone — governing ${f}\n` + [renderStale(st), renderRelevant(rv, "This file is governed by")].filter(Boolean).join("\n\n"));
   }
   if (event === "Stop") {
@@ -796,7 +815,7 @@ async function main(argv) {
       else console.log(`(nothing was stale, so this clears nothing — recorded as a re-check.)`);
       return;
     }
-    case "list": { const rows = need(r); for (const d of (f.all ? rows.filter((x) => (x.kind ?? "decision") === "decision") : inForce(rows))) console.log(`${d.id}  ${d.at.slice(0, 10)}  ${d.by}${d.status ? ` [${d.status}]` : ""}${d.supersedes ? ` ⟵ ${d.supersedes}` : ""}\n    ${d.decision}${d.why ? `\n    why: ${d.why}` : ""}${d.scope?.length ? `\n    scope: ${d.scope.join(", ")}` : ""}`); return; }
+    case "list": { const rows = need(r); const shown = f.all ? rows.filter((x) => (x.kind ?? "decision") === "decision") : inForce(rows); for (const d of shown) console.log(`${d.id}  ${d.at.slice(0, 10)}  ${d.by}${d.status ? ` [${d.status}]` : ""}${d.supersedes ? ` ⟵ ${d.supersedes}` : ""}\n    ${d.decision}${d.why ? `\n    why: ${d.why}` : ""}${d.scope?.length ? `\n    scope: ${d.scope.join(", ")}` : ""}`); logShown(r, "list", shown.length); return; }
     case "proposed": { const p = proposed(need(r)); if (!p.length) console.log("nothing proposed"); for (const d of p) console.log(`${d.id}  ${d.decision}${d.supersedes ? `  (reverses ${d.supersedes})` : ""}${d.scope?.length ? `  [${d.scope.join(", ")}]` : ""}`); return; }
     case "ratify": return setStatus(r, need(r), pos[0], null);
     case "reject": return setStatus(r, need(r), pos[0], "rejected");
@@ -805,7 +824,7 @@ async function main(argv) {
       const rows = need(r), f = pos[0] || "";
       const prob = fileProblem(r, f);
       if (prob) { console.log(`${prob}. Not answering "ungoverned" — that would read as "clear to proceed".`); return; }
-      const g = governing(rows, rel(r, f)); g.length ? g.forEach((d) => console.log(line(d))) : console.log("ungoverned"); return;
+      const g = governing(rows, rel(r, f)); logShown(r, "governing", g.length); g.length ? g.forEach((d) => console.log(line(d))) : console.log("ungoverned"); return;
     }
     case "stale": { // the guard: exit 1 on stale, 0 clean, never fails closed (the ledger is local)
       const st = guard(r);
@@ -852,18 +871,38 @@ function stats(r) {
     if (!e) fires.set(k, { ...x, surfaces: new Set([x.surface]) });
     else { e.surfaces.add(x.surface); if (x.at < e.at) e.at = x.at; }
   }
-  if (!fires.size) { console.log(`trailstone stats — ${repo}: 0 fires logged (${firesLog()})`); console.log("precision: n/a (no resolved fires yet)"); return; }
-  const tally = { redone: 0, holds: 0, wrong: 0, open: 0 };
-  const lines = [...fires.values()].sort((a, b) => a.at.localeCompare(b.at)).map((x) => {
-    const how = resolveFire(r, rows, x); tally[how]++;
-    return `${x.at.slice(0, 10)}  ${how.padEnd(6)}  ${x.file}  (${x.replacedById}, seen: ${[...x.surfaces].join("+")})`;
-  });
-  console.log(`trailstone stats — ${repo}: ${fires.size} fires`);
-  console.log("by surface: " + Object.entries(bySurface).map(([s, n]) => `${s} ${n}`).join(", "));
-  console.log(lines.join("\n"));
-  console.log(`resolved: redone ${tally.redone}, holds ${tally.holds}, wrong ${tally.wrong}, open ${tally.open}`);
-  const judged = tally.redone + tally.holds + tally.wrong;
-  console.log(judged ? `precision: ${Math.round(((tally.redone + tally.holds) / judged) * 100)}%` : "precision: n/a (no resolved fires yet)");
+  if (!fires.size) {
+    console.log(`trailstone stats — ${repo}: 0 fires (no reversal has caught stale work here)`);
+    console.log("precision: n/a (no resolved fires yet)");
+  } else {
+    const tally = { redone: 0, holds: 0, wrong: 0, open: 0 };
+    const lines = [...fires.values()].sort((a, b) => a.at.localeCompare(b.at)).map((x) => {
+      const how = resolveFire(r, rows, x); tally[how]++;
+      return `${x.at.slice(0, 10)}  ${how.padEnd(6)}  ${x.file}  (${x.replacedById}, seen: ${[...x.surfaces].join("+")})`;
+    });
+    console.log(`trailstone stats — ${repo}: ${fires.size} fires`);
+    console.log("by surface: " + Object.entries(bySurface).map(([s, n]) => `${s} ${n}`).join(", "));
+    console.log(lines.join("\n"));
+    console.log(`resolved: redone ${tally.redone}, holds ${tally.holds}, wrong ${tally.wrong}, open ${tally.open}`);
+    const judged = tally.redone + tally.holds + tally.wrong;
+    console.log(judged ? `precision: ${Math.round(((tally.redone + tally.holds) / judged) * 100)}%` : "precision: n/a (no resolved fires yet)");
+  }
+
+  // The denominator: a fire is the subset of surfacings that caught something. Without this,
+  // a healthy repo (0 fires) reads as "did nothing" — it actually means every decision surfaced
+  // still held. Push = shown to the agent unasked (prompt/edit/mcp); pull = someone asked (governing/list).
+  const shown = readShown().filter((x) => x.repo === repo);
+  const PUSH = new Set(["prompt", "edit", "mcp"]);
+  if (shown.length) {
+    const bySurf = {}; let push = 0, pull = 0;
+    for (const x of shown) { const n = x.shown || 1; bySurf[x.surface] = (bySurf[x.surface] || 0) + n; (PUSH.has(x.surface) ? (push += n) : (pull += n)); }
+    console.log(`\nsurfacings — a governing decision was put in front of someone ${push + pull} time(s):`);
+    console.log("  " + Object.entries(bySurf).map(([s, n]) => `${s} ${n}`).join(", "));
+    console.log(`  pushed to the agent unasked: ${push} · pulled on demand (agent or you): ${pull}`);
+    console.log(`  → ${fires.size} of these caught stale work; the rest kept the agent on a decision that still holds.`);
+  } else {
+    console.log("\nsurfacings: 0 — no decision has been surfaced yet (no prompts/edits under governance, no `governing`/`list` calls).");
+  }
 }
 
 // ── demo (P2) ────────────────────────────────────────────────────────────────
@@ -872,8 +911,9 @@ function stats(r) {
 // because this doubles as the README transcript.
 function demo(keep) {
   const dir = join(tmpdir(), `trailstone-demo-${Date.now()}`);
-  const old = process.env.TRAILSTONE_FIRES_LOG;
+  const old = process.env.TRAILSTONE_FIRES_LOG, oldShown = process.env.TRAILSTONE_SHOWN_LOG;
   process.env.TRAILSTONE_FIRES_LOG = join(dir, "fires.log"); // a demo never pollutes real stats
+  process.env.TRAILSTONE_SHOWN_LOG = join(dir, "surfaces.log");
   const g = (...a) => git(a, dir);
   const say = (cmd) => console.log(`\n$ trailstone ${cmd}`);
   try {
@@ -907,6 +947,7 @@ function demo(keep) {
     console.log(`\nThat is the whole product. The ledger is one file you commit:\n\n${readFileSync(join(dir, LEDGER), "utf8")}`);
   } finally {
     old == null ? delete process.env.TRAILSTONE_FIRES_LOG : (process.env.TRAILSTONE_FIRES_LOG = old);
+    oldShown == null ? delete process.env.TRAILSTONE_SHOWN_LOG : (process.env.TRAILSTONE_SHOWN_LOG = oldShown);
   }
   if (keep) console.log(`kept: ${dir}`); else { rmSync(dir, { recursive: true, force: true }); console.log("(throwaway repo deleted — `demo --keep` to poke at it)"); }
 }
@@ -1060,6 +1101,7 @@ function mcp(f = {}) {
         const prob = fileProblem(r, a.file);
         if (prob) return `${prob}. I am not answering "ungoverned", because that would tell you the file is clear when I cannot see it.`;
         const g = governing(rows || [], rel(r, a.file));
+        logShown(r, "mcp", g.length);
         return g.length ? `Decisions governing ${a.file} — honor these:\n` + g.map((d) => `[${d.id}] ${d.decision}${d.why ? ` (why: ${d.why})` : ""}`).join("\n") : `No decision governs ${a.file}.`;
       }
       case "stale": { const st = stale(r, rows || []); logFires(r, st, "mcp"); return st.length ? renderStale(st) : "Clean — nothing rests on a reversed decision."; }
@@ -1332,20 +1374,28 @@ function selfcheck() {
   append(dir, { id: "d_p", at: "2023-01-01T00:00:00Z", by: "t", decision: "proposed thing", scope: ["src/auth/**"], supersedes: "d_new", status: "proposed" });
   ok(inForce(load(dir)).some((d) => d.id === "d_new") && stale(dir).length === 1, "a proposed reversal binds nothing");
   { // the fire log: one line per shown stale file, deduped per day, and the --wrong verdict
-    const prev = process.env.TRAILSTONE_FIRES_LOG;
+    const prev = process.env.TRAILSTONE_FIRES_LOG, prevShown = process.env.TRAILSTONE_SHOWN_LOG;
     process.env.TRAILSTONE_FIRES_LOG = join(dir, "fires.log");
+    process.env.TRAILSTONE_SHOWN_LOG = join(dir, "surfaces.log");
     try {
       guard(dir);
       const fires = readFires();
       ok(fires.length === 1 && fires[0].surface === "guard" && fires[0].file === "src/auth/jwt.ts" && fires[0].replacedById === "d_new", "guard logs one fire");
       guard(dir); ok(readFires().length === 1, "same (repo,file,reversal,surface) is logged once a day");
+      // the surface counter: a shown decision is logged as the denominator, separate from fires
+      logShown(dir, "prompt", 2); logShown(dir, "governing", 1); logShown(dir, "edit", 0);
+      const sh = readShown();
+      ok(sh.length === 2 && sh.reduce((s, x) => s + x.shown, 0) === 3, "logShown records surfacings and skips a zero-count show");
       const wrongRow = { kind: "validation", id: "v_w", at: "2024-01-01T00:00:00Z", by: "t", decisionId: "d_new", scope: ["src/auth/jwt.ts"], wrong: true };
       append(dir, wrongRow);
       const back = load(dir).find((x) => x.id === "v_w");
       ok(back.wrong === true, "wrong survives the yaml round-trip as a boolean");
       ok(resolveFire(dir, load(dir), fires[0]) === "wrong", "a --wrong validation classifies the fire as a false positive");
       const rows2 = load(dir); rows2.pop(); rewrite(dir, rows2); // drop it again: it would clear the stale below
-    } finally { prev == null ? delete process.env.TRAILSTONE_FIRES_LOG : (process.env.TRAILSTONE_FIRES_LOG = prev); }
+    } finally {
+      prev == null ? delete process.env.TRAILSTONE_FIRES_LOG : (process.env.TRAILSTONE_FIRES_LOG = prev);
+      prevShown == null ? delete process.env.TRAILSTONE_SHOWN_LOG : (process.env.TRAILSTONE_SHOWN_LOG = prevShown);
+    }
   }
   ok(stale(dir).length === 1, "dropping the validation restores the flag");
   writeFileSync(join(dir, "src", "auth", "jwt.ts"), "fixed"); g("add", "."); g("commit", "-qm", "fix"); ok(stale(dir).length === 0, "commit after the reversal clears");

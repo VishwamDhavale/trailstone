@@ -313,6 +313,15 @@ that decision, `validate <id> --scope <file> --wrong` records the false positive
 `stats` prints fires by surface and the resulting precision. If precision drops,
 scopes are too broad — narrow them; do not soften the rule.
 
+**Fires are the rare event; surfacings are the denominator.** A healthy repo goes a
+long time with zero fires — that does not mean the tool did nothing, it means every
+decision it surfaced still held. So `stats` also counts every time a governing decision
+was actually *put in front of someone* — split into **pushed** to the agent unasked
+(the session/prompt/edit hooks, MCP) and **pulled** on demand (`governing`, `list`). A
+clean repo then reads `surfaced 40×, fired 0` instead of an empty log — the difference
+between "kept the agent on course 40 times" and "was never even consulted". (This is a
+count of exposure, not proof the agent obeyed — that only a reversal it honors can show.)
+
 `report` is the same numbers in a form you can paste into an issue; `report --anon`
 drops every name and reduces each path to its extension, so it is shareable from a
 private repo. That is how a maintainer learns whether the fires were any good.
