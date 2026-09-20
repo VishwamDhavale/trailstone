@@ -33,12 +33,39 @@ export TRAILSTONE_CAPTURE=0     # disables passive capture entirely
 It is also a silent no-op when the `claude` binary is not on your PATH. Everything
 else — recording, surfacing, staleness, the push guard — works fully offline.
 
-## The ledger is plaintext, in your repo
+## The ledger is as public as the repo it lives in
 
-`.trailstone/decisions.yml` is committed with your code and readable by anyone who can
-read the repo. **Do not put secrets, credentials, or sensitive personal data in decision
-text or `--why` rationale.** Write "use the managed secret store, not env files", never
-the secret itself.
+`.trailstone/decisions.yml` is a plaintext file committed with your code. It is readable —
+including its full history, author names, and timestamps — by anyone who can read the repo.
+On a public or shared repo, **your decisions are published.** Two things follow:
+
+- **Never put secrets, credentials, or sensitive personal data** in decision text or
+  `--why` rationale. Write "use the managed secret store, not env files", never the secret.
+- **A confidential choice goes in the private ledger.** If a decision is sensitive — pricing,
+  a competitive move, an unannounced pivot — record it with `--private`:
+
+  ```bash
+  trailstone decide "..." --why "..." --scope <paths> --private
+  ```
+
+  It is written to `.trailstone/private.yml`, which `install` adds to `.gitignore`, so it is
+  **never committed or pushed**. It still works fully on your machine — it surfaces to the
+  agent and flags stale work exactly like a public decision; the tool merges both ledgers on
+  read. Reversing or validating a private decision stays private too. Point it at a store
+  outside the repo entirely with `TRAILSTONE_PRIVATE=/path/to/private.yml`.
+
+  The pre-push guard (`trailstone stale`) refuses the push if `private.yml` was ever
+  force-added to git, and `trailstone doctor` reports whether it is safely untracked.
+
+Rewriting history to remove an already-pushed *public* decision is possible (`git
+filter-repo`) but imperfect once it is out — clones and forks keep their copies. The reliable
+control is `--private`, or not recording it at all.
+
+**Open-source maintainers:** if you dogfood Trailstone on the same repo you publish, your
+public ledger becomes part of the release. That is often a feature ("it governs itself"); put
+anything you would not want public in the private ledger, or keep the real ledger in a
+gitignore your `.trailstone/decisions.yml` and commit a curated
+`.trailstone/decisions.example.yml` instead (this is what Trailstone's own repo does).
 
 ## Availability is a security property here
 

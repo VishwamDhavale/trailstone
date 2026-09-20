@@ -58,11 +58,35 @@ const VERSION = (() => {
   try { return JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8")).version || "0.2.0"; }
   catch { return "0.2.0"; }  // a bare copy of the script with no package.json beside it
 })();
+// The ledger filenames, defined once so nothing drifts. LEDGER is the committed, shared ledger;
+// PRIVATE_LEDGER is the never-pushed one. *_REL are the forward-slash forms git wants for
+// .gitignore entries and `git ls-files` (join() yields backslashes on Windows).
 const LEDGER = join(".trailstone", "decisions.yml");
+const LEDGER_REL = LEDGER.replace(/\\/g, "/");
+const PRIVATE_LEDGER = join(".trailstone", "private.yml");
+const PRIVATE_REL = PRIVATE_LEDGER.replace(/\\/g, "/");
 const HEADER = `# Trailstone decision ledger. One entry per decision: what was decided, why, and the
 # paths it governs. Decisions are immutable — reverse one with a new entry carrying
 # \`supersedes: <id>\`. Editing this file in a PR IS the review.
 `;
+// The PRIVATE ledger holds decisions that must never be pushed — secrets-adjacent choices,
+// strategy, unannounced plans. It is MERGED on load so the tool operates fully (surfacing,
+// staleness, the guard) with them, but the file itself never leaves the machine. Default is
+// in-repo and gitignored; TRAILSTONE_PRIVATE points it at an external store instead (outside
+// the working tree — cannot be committed at all, survives a repo delete, but is per-machine).
+const privatePath = (r) => process.env.TRAILSTONE_PRIVATE || join(r, PRIVATE_LEDGER);
+const privateInRepo = () => !process.env.TRAILSTONE_PRIVATE;
+const PRIVATE_HEADER = `# Trailstone PRIVATE ledger — gitignored, never pushed. Sensitive decisions
+# (secrets-adjacent, strategy, unannounced plans) live here; the tool merges them locally.
+`;
+// Make the in-repo private ledger uncommittable. Idempotent; a no-op for an external store.
+function ignorePrivate(r) {
+  if (!privateInRepo()) return;
+  const gi = join(r, ".gitignore");
+  let cur = ""; try { cur = readFileSync(gi, "utf8"); } catch {}
+  if (cur.split("\n").some((l) => l.trim() === PRIVATE_REL)) return;
+  try { writeFileSync(gi, (cur && !cur.endsWith("\n") ? cur + "\n" : cur) + PRIVATE_REL + "\n"); } catch {}
+}
 
 // ── git ───────────────────────────────────────────────────────────────────────
 // stderr ignored: every caller already treats a failure as "no answer", and a raw git error
@@ -118,7 +142,7 @@ const q = (s) => (/^$|^[-?:,[\]{}#&*!|>'"%@`]|:\s|\s#|^\s|\s$|\n/.test(s) ||
 const unq = (s) => { if (!s.startsWith('"')) return s; try { return JSON.parse(s); } catch { return s; } };
 
 export function yamlEmit(row) {
-  const keys = [...FIELDS.filter((k) => k in row), ...Object.keys(row).filter((k) => !FIELDS.includes(k))];
+  const keys = [...FIELDS.filter((k) => k in row), ...Object.keys(row).filter((k) => !FIELDS.includes(k) && !k.startsWith("_"))];
   const out = [];
   for (const k of keys) {
     const v = row[k];
@@ -147,11 +171,21 @@ export function yamlParse(text) {
 
 // ── ledger ────────────────────────────────────────────────────────────────────
 export function load(r) {
-  const p = join(r, LEDGER);
-  if (!existsSync(p)) return null;
-  return yamlParse(readFileSync(p, "utf8"));
+  const pub = join(r, LEDGER), priv = privatePath(r);
+  const hasPub = existsSync(pub), hasPriv = existsSync(priv);
+  if (!hasPub && !hasPriv) return null;
+  const rows = hasPub ? yamlParse(readFileSync(pub, "utf8")) : [];
+  // Private rows are tagged (not serialized — yamlEmit skips `_` keys) so writes route back to
+  // the right file and the guard can tell public from private.
+  if (hasPriv) for (const row of yamlParse(readFileSync(priv, "utf8"))) rows.push({ ...row, _private: true });
+  return rows;
 }
-function append(r, row) { appendFileSync(join(r, LEDGER), yamlEmit(row)); return row; }
+// priv=true routes the write to the private (never-pushed) ledger, creating + gitignoring it lazily.
+function append(r, row, priv = false) {
+  const p = priv ? privatePath(r) : join(r, LEDGER);
+  if (priv && !existsSync(p)) { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, PRIVATE_HEADER); ignorePrivate(r); }
+  appendFileSync(p, yamlEmit(row)); return row;
+}
 function rewrite(r, rows) { // keep the leading comment header a rewrite would otherwise eat
   const p = join(r, LEDGER);
   const lines = existsSync(p) ? readFileSync(p, "utf8").split("\n") : [];
@@ -365,7 +399,7 @@ async function hook() {
   if (event === "SessionStart") {
     const st = stale(r, rows), n = inForce(rows).length, p = proposed(rows).length;
     logFires(r, st, "session");
-    return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`.` + (st.length ? "\n\n" + renderStale(st) : ""));
+    return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`. This ledger is committed and public — for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) add \`--private\` to keep it in the gitignored, never-pushed private ledger.` + (st.length ? "\n\n" + renderStale(st) : ""));
   }
   if (event === "UserPromptSubmit") {
     const touched = readJson(sessFile(input.session_id, "edit"), []);
@@ -701,7 +735,8 @@ function setStatus(r, rows, id, status) {
   // Splice ONLY this entry's lines back into the raw file. Re-emitting every row (what
   // `rewrite` does) drops hand-written `#` notes between entries — the ledger is a file a
   // human reviews in a PR, so their comments outrank our formatting.
-  const p = join(r, LEDGER), lines = readFileSync(p, "utf8").split("\n");
+  // A private decision is spliced back into the private ledger, never the public one.
+  const p = row._private ? privatePath(r) : join(r, LEDGER), lines = readFileSync(p, "utf8").split("\n");
   const starts = lines.map((l, i) => (/^-\s/.test(l) ? i : -1)).filter((i) => i >= 0);
   const idRe = new RegExp(`^(?:-|\\s{2})\\s*id:\\s+"?${id}"?\\s*$`);
   const k = starts.findIndex((s, j) => lines.slice(s, starts[j + 1] ?? lines.length).some((l) => idRe.test(l)));
@@ -738,7 +773,8 @@ async function main(argv) {
       mkdirSync(join(r, ".trailstone"), { recursive: true });
       if (!existsSync(join(r, LEDGER))) writeFileSync(join(r, LEDGER), HEADER);
       if (f.goal) append(r, { kind: "goal", id: newId("g"), at: new Date().toISOString(), by: who(r), decision: String(f.goal) });
-      console.log(`${LEDGER} ready — commit it. Decisions: \`decide "..." --why "..." --scope src/x.ts,src/y/\`${f.goal ? "" : `; set the goal: \`goal "<what this project is>"\``}`); return;
+      console.log(`${LEDGER} ready — commit it. Decisions: \`decide "..." --why "..." --scope src/x.ts,src/y/\`${f.goal ? "" : `; set the goal: \`goal "<what this project is>"\``}`);
+      console.log(`This ledger is committed and as public as the repo. A sensitive choice (secret, customer data, pricing, an unannounced plan) → \`decide "..." --private\`: it goes to .trailstone/private.yml, gitignored and never pushed, and still works locally.`); return;
     }
     case "goal": {
       const rows = need(r); const text = pos.join(" ");
@@ -763,8 +799,13 @@ async function main(argv) {
         supersedes = res.id;
       }
       const old = supersedes && rows.find((x) => x.id === supersedes);
-      const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: text, why: f.why || "", scope: scope.length ? scope : old?.scope || [], ...(supersedes ? { supersedes } : {}), ...(f.proposed ? { status: "proposed" } : {}) });
-      console.log(`${row.id} recorded${supersedes ? ` (supersedes ${supersedes})` : ""}. Commit ${LEDGER} to make it bind for everyone.`);
+      // Private if asked (--private), or inherited: reversing/validating a private decision stays
+      // private, so a public row never reveals that a private one existed.
+      const priv = !!f.private || !!(old && old._private);
+      const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: text, why: f.why || "", scope: scope.length ? scope : old?.scope || [], ...(supersedes ? { supersedes } : {}), ...(f.proposed ? { status: "proposed" } : {}) }, priv);
+      console.log(priv
+        ? `${row.id} recorded${supersedes ? ` (supersedes ${supersedes})` : ""} in the PRIVATE ledger (.trailstone/private.yml) — gitignored, never pushed. It works locally like any decision.`
+        : `${row.id} recorded${supersedes ? ` (supersedes ${supersedes})` : ""}. Commit ${LEDGER} to make it bind for everyone. (Sensitive? re-record with \`--private\`.)`);
       // Blast radius at record time: how many files this scope covers. A reversal will make you
       // re-check EVERY one of them — most will hold, so a broad scope is a noisy reversal later.
       // Say it now, while the scope can still be narrowed. (R5's blast-radius preview, in the CLI.)
@@ -805,7 +846,8 @@ async function main(argv) {
       // the fact that one cause was cleared while another still stands.
       const key = (x) => `${x.file}\u0000${x.replacedById}`;
       const before = stale(r);
-      const row = append(r, { kind: "validation", id: newId("v"), at: new Date().toISOString(), by: who(r), decisionId: id, scope, ...(f.wrong ? { wrong: true } : {}) });
+      const priv = !!(rows.find((x) => x.id === id) || {})._private; // a private decision's validation stays private
+      const row = append(r, { kind: "validation", id: newId("v"), at: new Date().toISOString(), by: who(r), decisionId: id, scope, ...(f.wrong ? { wrong: true } : {}) }, priv);
       const after = stale(r), afterKeys = new Set(after.map(key));
       const cleared = [...new Set(before.filter((x) => !afterKeys.has(key(x))).map((x) => x.file))];
       const left = [...new Set(after.map((x) => x.file))];
@@ -827,6 +869,15 @@ async function main(argv) {
       const g = governing(rows, rel(r, f)); logShown(r, "governing", g.length); g.length ? g.forEach((d) => console.log(line(d))) : console.log("ungoverned"); return;
     }
     case "stale": { // the guard: exit 1 on stale, 0 clean, never fails closed (the ledger is local)
+      // HARD STOP before anything else: the private ledger is meant to stay local. If it got
+      // tracked, this pre-push run is about to publish it — the exact leak the feature prevents.
+      if (privateInRepo() && existsSync(privatePath(r))) {
+        try {
+          git(["ls-files", "--error-unmatch", PRIVATE_REL], r);
+          console.error(`trailstone: .trailstone/private.yml is TRACKED by git and about to be pushed — it holds decisions meant to stay local.\n  Untrack it (keeps the file on disk):  git rm --cached .trailstone/private.yml\n  It is already in .gitignore, so this only happens if it was added before the ignore existed.`);
+          process.exit(1);
+        } catch {} // not tracked → good, the normal case
+      }
       const st = guard(r);
       // "clean" must mean "I checked and nothing is stale", never "I had nothing to check".
       // With no ledger this printed "clean" and exited 0 — so a CI gate (`trailstone stale`) on a
@@ -1015,7 +1066,25 @@ function doctor() {
   else {
     say(true, `${inForce(rows).length} decisions in force, ${proposed(rows).length} proposed${goal(rows) ? "" : " (no goal set — `goal \"<what this project is>\"`)"}`);
     try { git(["ls-files", "--error-unmatch", LEDGER], r); say(true, "ledger is committed, so it travels with a clone"); }
-    catch { say(false, "ledger is NOT committed — it binds nobody until you commit it"); }
+    catch {
+      // Not tracked. That is a problem for a normal project — but deliberate if the ledger is
+      // gitignored (a repo, like Trailstone's own, that keeps its decisions local and ships only
+      // an example). Tell the two apart instead of always crying "not committed".
+      let ignored = false; try { git(["check-ignore", "-q", LEDGER_REL], r); ignored = true; } catch {}
+      if (ignored) say(true, "ledger is gitignored — kept local on purpose, never pushed (see decisions.example.yml if you ship one)");
+      else say(false, "ledger is NOT committed — it binds nobody until you commit it");
+    }
+  }
+
+  // The private ledger: present it, and shout if it ever got tracked (about to be pushed).
+  if (existsSync(privatePath(r))) {
+    const pn = (() => { try { return yamlParse(readFileSync(privatePath(r), "utf8")).filter((x) => typeof x.id === "string").length; } catch { return 0; } })();
+    if (privateInRepo()) {
+      let tracked = false; try { git(["ls-files", "--error-unmatch", PRIVATE_REL], r); tracked = true; } catch {}
+      say(!tracked, tracked
+        ? "PRIVATE ledger is TRACKED by git — it WILL be pushed: `git rm --cached .trailstone/private.yml`"
+        : `private ledger: ${pn} decision(s), gitignored, never pushed`);
+    } else say(true, `private ledger: ${pn} decision(s) at ${privatePath(r)} (external store, outside the repo)`);
   }
 
   // Count the hook ENTRIES structurally. A regex over the serialised settings used to look
@@ -1051,7 +1120,7 @@ const MCP_TOOLS = [
   { name: "list_decisions", description: "The decisions in force in this repo's ledger: what was decided, why, and which files each governs.", inputSchema: { type: "object", properties: { repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } } } },
   { name: "governing", description: "Which decisions bind a given file. Call this BEFORE editing a file, and honor what it returns.", inputSchema: { type: "object", properties: { file: { type: "string", description: "Path to the file (absolute, or relative to the repo root)." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["file"] } },
   { name: "stale", description: "Files last committed BEFORE a decision governing them was reversed: they rest on a decision that has since changed and must be re-checked before you build on them.", inputSchema: { type: "object", properties: { repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } } } },
-  { name: "decide", description: "Record a real choice that forecloses an alternative. Phrase it as 'X, not Y' so a later reversal reads as a diff. Scope it as narrowly as the change really is.", inputSchema: { type: "object", properties: { decision: { type: "string" }, why: { type: "string" }, scope: { type: "array", items: { type: "string" }, description: "Paths, directories or globs this decision governs." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision"] } },
+  { name: "decide", description: "Record a real choice that forecloses an alternative. Phrase it as 'X, not Y' so a later reversal reads as a diff. Scope it as narrowly as the change really is. The ledger is committed and public — set private=true for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) to keep it in the gitignored, never-pushed private ledger.", inputSchema: { type: "object", properties: { decision: { type: "string" }, why: { type: "string" }, scope: { type: "array", items: { type: "string" }, description: "Paths, directories or globs this decision governs." }, private: { type: "boolean", description: "Keep this decision out of the committed/pushed ledger (secrets-adjacent, strategy, unannounced plans). It still surfaces and flags stale work locally." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision"] } },
   { name: "reverse", description: "Record that a decision has changed. Flags every tracked file that still rests on the old one.", inputSchema: { type: "object", properties: { decision_ref: { type: "string", description: "The id of the decision being reversed, or a unique phrase from its text." }, decision: { type: "string", description: "The NEW decision." }, why: { type: "string" }, scope: { type: "array", items: { type: "string" } }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision_ref", "decision"] } },
   { name: "validate", description: "Record that you re-checked a flagged file against the decision and it still holds (this clears the flag). Set wrong=true when the file never rested on that decision at all.", inputSchema: { type: "object", properties: { decision_ref: { type: "string" }, file: { type: "string" }, wrong: { type: "boolean" }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision_ref", "file"] } },
 ];
@@ -1107,9 +1176,10 @@ function mcp(f = {}) {
       case "stale": { const st = stale(r, rows || []); logFires(r, st, "mcp"); return st.length ? renderStale(st) : "Clean — nothing rests on a reversed decision."; }
       case "decide": {
         if (!a.decision) return "decision is required.";
-        if (!load(r)) { mkdirSync(join(r, ".trailstone"), { recursive: true }); writeFileSync(join(r, LEDGER), HEADER); }
+        if (!load(r) && !a.private) { mkdirSync(join(r, ".trailstone"), { recursive: true }); writeFileSync(join(r, LEDGER), HEADER); }
         const scope = Array.isArray(a.scope) ? a.scope : [];
-        const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision, why: a.why || "", scope });
+        const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision, why: a.why || "", scope }, !!a.private);
+        if (a.private) return `Recorded ${row.id} in the PRIVATE ledger (.trailstone/private.yml, gitignored, never pushed). It works locally like any decision.${scope.length ? "" : " No scope — it governs nothing; add scope to make a reversal flag work."}`;
         if (!scope.length) return `Recorded ${row.id}, but with NO scope it governs nothing and a reversal will flag nothing. Add scope to make it enforceable.`;
         const n = trackedFiles(r).filter((x) => scopeHits(scope, x)).length;
         if (!n) return `Recorded ${row.id}, but its scope (${scope.join(", ")}) matches NO tracked file in this repo — so it governs nothing and a reversal will flag nothing. Check the path (typo? outside the repo? not committed yet?) and record it again with a scope that matches, or reverse this one.`;
@@ -1121,7 +1191,7 @@ function mcp(f = {}) {
         if (res.error) return res.error;
         const old = all.find((x) => x.id === res.id);
         const scope = (Array.isArray(a.scope) && a.scope.length) ? a.scope : (old.scope || []);
-        const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision, why: a.why || "", scope, supersedes: res.id });
+        const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision, why: a.why || "", scope, supersedes: res.id }, !!old._private || !!a.private);
         const st = stale(r).filter((s) => s.replacedById === row.id);
         return `Recorded ${row.id} (supersedes ${res.id}).` + (st.length ? `\nNow stale — re-check these before building on them:\n` + st.map((s) => `  ${s.file}`).join("\n") : "\nNothing became stale.");
       }
@@ -1129,7 +1199,7 @@ function mcp(f = {}) {
         if (!a.decision_ref || !a.file) return "decision_ref and file are required.";
         const res = resolveRef(a.decision_ref, all);
         if (res.error) return res.error;
-        const row = append(r, { kind: "validation", id: newId("v"), at: new Date().toISOString(), by: who(r), decisionId: res.id, scope: [rel(r, a.file)], ...(a.wrong ? { wrong: true } : {}) });
+        const row = append(r, { kind: "validation", id: newId("v"), at: new Date().toISOString(), by: who(r), decisionId: res.id, scope: [rel(r, a.file)], ...(a.wrong ? { wrong: true } : {}) }, !!(all.find((x) => x.id === res.id) || {})._private);
         return `${row.id}: recorded that ${a.file} was re-checked against ${res.id} — ${a.wrong ? "FALSE POSITIVE (it never rested on that decision)" : "it still holds"}.`;
       }
       default: return `Unknown tool ${name}.`;
@@ -1183,6 +1253,14 @@ trailstone stale               # files resting on a REVERSED decision — re-che
   \`trailstone decide "X, not Y" --why "<reason>" --scope <paths>\`
   Keep the scope as narrow as the change really is — a whole-directory scope becomes an
   alarm everyone learns to ignore.
+- **This ledger is committed and as public as the repo.** Anyone who can read the repo reads
+  every decision, its rationale, author and date. Before recording, ask: would I put this in a
+  public commit message? If a choice is **sensitive** — a secret or credential, customer data,
+  pricing, a competitive move, an unannounced plan — do NOT put it in the public ledger. Record
+  it with \`trailstone decide "..." --why "..." --scope <paths> --private\`: it goes to
+  \`.trailstone/private.yml\`, which is gitignored and never pushed, and works locally exactly
+  like any decision (it still surfaces and still flags stale work). Never write the secret
+  itself into any ledger — record the decision it drives ("use the managed secret store").
 - Trailstone is internal tooling. **Never mention it in the README or any public- or
   product-facing docs** — record the *decisions* there in plain prose if useful, but not
   the tool, the CLI, or \`.trailstone/\`.
@@ -1310,6 +1388,7 @@ function install(f = {}) {
     const pp = join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push");
     if (existsSync(pp)) console.log(`pre-push exists at ${pp} — add: node "${SELF_CMD}" stale`);
     else { mkdirSync(dirname(pp), { recursive: true }); writeFileSync(pp, `#!/bin/sh\nexec "${NODE_ABS}" "${SELF_CMD}" stale\n`); chmodSync(pp, 0o755); console.log(`pre-push → ${pp}`); }
+    ignorePrivate(r); // reserve the private-ledger slot in .gitignore now, before any private decision exists
     if (f["no-rules"]) console.log("skipped the agent rules file (--no-rules)");
     else writeRules(r);
     // Independent of --no-rules: that flag is about not writing prose into the repo. The Cursor
@@ -1692,6 +1771,34 @@ function selfcheck() {
     // but a real command still refuses, and says what to do about it
     const bad = spawnSync(process.execPath, [SELF, "list"], { cwd: dir, encoding: "utf8" });
     ok(bad.status === 2 && /git init|cd into one/.test(bad.stderr), "a real command outside a repo still fails, with an actionable message");
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // The private ledger: a sensitive decision operates locally but never reaches the public file,
+  // is gitignored, does not leak its tag, and the push guard blocks it if it ever gets tracked.
+  {
+    const dir = join(tmpdir(), `trailstone-priv-${Date.now()}`); mkdirSync(join(dir, "src"), { recursive: true });
+    const gg = (...a) => git(a, dir);
+    gg("init", "-q"); gg("config", "user.email", "t@t"); gg("config", "user.name", "t");
+    writeFileSync(join(dir, "src", "billing.ts"), "x"); gg("add", ".");
+    execFileSync("git", ["commit", "-q", "-m", "w", "--date", "2020-01-01T00:00:00Z"], { cwd: dir, env: { ...process.env, GIT_COMMITTER_DATE: "2020-01-01T00:00:00Z" } });
+    mkdirSync(join(dir, ".trailstone")); writeFileSync(join(dir, LEDGER), HEADER);
+    const run = (...a) => spawnSync(process.execPath, [SELF, ...a], { cwd: dir, encoding: "utf8" });
+    const idOf = (o) => (o.match(/d_[a-f0-9]+/) || [])[0];
+    const P = idOf(run("decide", "Prices double on the enterprise tier", "--why", "margin", "--scope", "src/billing.ts", "--private").stdout);
+    ok(!!P, "decide --private records a decision");
+    const pubTxt = readFileSync(join(dir, LEDGER), "utf8");
+    ok(existsSync(join(dir, ".trailstone", "private.yml")), "the private ledger file was created");
+    ok(!pubTxt.includes(P) && !/enterprise tier/.test(pubTxt), "the private decision is NOT in the public committed ledger");
+    ok(/enterprise tier/.test(readFileSync(join(dir, ".trailstone", "private.yml"), "utf8")), "the private decision IS in private.yml");
+    ok(!/_private/.test(readFileSync(join(dir, ".trailstone", "private.yml"), "utf8")), "the load-time _private tag is never serialized to disk");
+    ok(governing(load(dir), "src/billing.ts").some((d) => d.id === P), "load() merges the private decision so it surfaces locally");
+    ok(readFileSync(join(dir, ".gitignore"), "utf8").split("\n").some((l) => l.trim() === ".trailstone/private.yml"), "the private ledger was added to .gitignore");
+    // The push guard: if the private ledger ever gets tracked, `stale` (the pre-push hook) blocks.
+    ok(run("stale").status === 0, "stale passes when the private ledger is untracked (the normal case)");
+    gg("add", "-f", ".trailstone/private.yml");
+    const blocked = run("stale");
+    ok(blocked.status === 1 && /private\.yml is TRACKED/.test(blocked.stderr), "the guard BLOCKS a push once the private ledger is tracked");
     rmSync(dir, { recursive: true, force: true });
   }
 

@@ -2,3 +2,7 @@ node_modules/
 *.tgz
 *.log
 .DS_Store
+# This repo IS Trailstone, so we keep our own real decisions local and ship only the
+# committed example (.trailstone/decisions.example.yml). Normal projects DO commit decisions.yml.
+.trailstone/decisions.yml
+.trailstone/private.yml

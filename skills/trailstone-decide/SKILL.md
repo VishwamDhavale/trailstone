@@ -30,6 +30,21 @@ node $A reverse d_6d0bf686 "Sessions use JWT in an Authorization header, not coo
 Name the alternative in the text ("X, not Y") — the reversal has to read as a diff.
 `--scope` is the paths the decision *governs*, not the paths you happened to edit.
 
+## Sensitive decisions — use `--private`
+
+This ledger is committed and **as public as the repo**. Before recording, ask: would this be
+fine in a public commit message? If the choice is sensitive — a secret/credential, customer
+data, pricing, a competitive move, an unannounced plan — add `--private`:
+
+```bash
+node $A decide "Enterprise price doubles in Q3" --why "margin" --scope src/billing.ts --private
+```
+
+It goes to `.trailstone/private.yml` (gitignored, never pushed) and works locally exactly like
+any decision — it still surfaces and still flags stale work. Reversing/validating a private
+decision stays private. Never write the secret *itself* into any ledger — record the decision
+it drives ("use the managed secret store, not env files").
+
 ## When a STALE warning appears
 
 It names `was:` and `now:`. Do not silently fix, and do not ignore it:

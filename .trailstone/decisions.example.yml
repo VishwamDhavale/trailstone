@@ -1,0 +1,63 @@
+# Trailstone decision ledger. One entry per decision: what was decided, why, and the
+# paths it governs. Decisions are immutable — reverse one with a new entry carrying
+# `supersedes: <id>`. Editing this file in a PR IS the review.
+#
+# This is a committed EXAMPLE ledger for a fictional "Tasks API" — it shows adopters what a
+# real ledger (.trailstone/decisions.yml) looks like: a goal, decisions with scope, one
+# reversal that demonstrates staleness, and one proposed capture. The tool does NOT load this
+# file; it is reference only. Trailstone's OWN real decisions.yml is gitignored in this repo
+# (the maintainers keep them local). To start your own: `trailstone init`, or `trailstone demo`.
+- kind: goal
+  id: g_1a2b3c4d
+  at: 2026-01-05T09:00:00.000Z
+  by: example
+  decision: "A small REST API for shared task lists: create lists, add tasks, assign them, and mark them done."
+- id: d_11aa22bb
+  at: 2026-01-05T09:12:00.000Z
+  by: example
+  decision: Store data in PostgreSQL, not DynamoDB
+  why: tasks and lists are relational (foreign keys, joins for 'my assigned tasks'); a document store would push that join work into application code
+  scope:
+    - src/db/
+- id: d_33cc44dd
+  at: 2026-01-06T14:30:00.000Z
+  by: example
+  decision: Sessions are a signed HttpOnly cookie, not a JWT in an Authorization header
+  why: a header token lives in JS-reachable storage and is replayable if stolen; an HttpOnly cookie is not readable by script and is scoped to the domain
+  scope:
+    - src/auth/
+- id: d_55ee66ff
+  at: 2026-01-08T11:05:00.000Z
+  by: example
+  decision: Validate every request body at the route boundary with a schema, and reject unknown fields
+  why: keeps mass-assignment out of the handlers and gives the caller one clear error shape
+  scope:
+    - src/api/
+- id: d_77aa88bb
+  at: 2026-02-02T16:20:00.000Z
+  by: example
+  decision: Cache the per-user task list in Redis with a 30s TTL
+  why: the dashboard refetches the list on every navigation and the query is hot
+  scope:
+    - src/api/tasks.ts
+# A reversal: the Redis cache above was reversed. Any file resting on d_77aa88bb whose
+# last commit predates this entry is flagged stale until re-checked (an edit + commit clears
+# it, or `trailstone validate` records that it still holds).
+- id: d_99cc00dd
+  at: 2026-02-20T10:15:00.000Z
+  by: example
+  decision: Drop the Redis cache; serve the task list straight from Postgres
+  why: the 30s TTL served users stale lists right after they edited one — the bug reports outweighed the latency win, and the query was fast enough with the right index
+  scope:
+    - src/api/tasks.ts
+  supersedes: d_77aa88bb
+# A proposed capture (status: proposed) binds nothing and gates nothing until a human
+# ratifies it. This is what passive capture writes; you accept or reject it in review.
+- id: d_aabbccdd
+  at: 2026-02-21T09:40:00.000Z
+  by: example (captured)
+  decision: Rate-limit the write endpoints to 60 requests/min per user
+  why: a retry loop in the mobile client hammered POST /tasks during an outage
+  scope:
+    - src/api/
+  status: proposed
