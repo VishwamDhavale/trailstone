@@ -1141,6 +1141,9 @@ trailstone stale               # files resting on a REVERSED decision — re-che
   \`trailstone decide "X, not Y" --why "<reason>" --scope <paths>\`
   Keep the scope as narrow as the change really is — a whole-directory scope becomes an
   alarm everyone learns to ignore.
+- Trailstone is internal tooling. **Never mention it in the README or any public- or
+  product-facing docs** — record the *decisions* there in plain prose if useful, but not
+  the tool, the CLI, or \`.trailstone/\`.
 <!-- /trailstone:rules -->`;
 
 // AGENTS.md is the cross-harness convention; Cursor gets its own rules file, but only

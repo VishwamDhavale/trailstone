@@ -53,6 +53,11 @@ d_a1b2c3d4 recorded. scope src/auth/ covers 4 tracked files — a reversal will 
 Scope discipline is the whole game: a tight scope is a sharp tool, a whole-directory scope is an
 alarm you'll learn to ignore.
 
+**It only watches the files you scope.** A decision's *prose* can still drift in a file no
+decision names — a README that describes an approach you've since reversed, a stale comment. That
+is real drift the tool will not flag, because it tracks scoped files, not every place a decision is
+described. Scope the docs you want watched, and treat the rest as your job.
+
 ## Install
 
 ```bash
