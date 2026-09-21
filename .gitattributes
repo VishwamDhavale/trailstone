@@ -1,0 +1,2 @@
+.trailstone/decisions.yml merge=union
+.trailstone/private.yml merge=union

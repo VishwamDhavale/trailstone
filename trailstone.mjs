@@ -88,6 +88,18 @@ function ignorePrivate(r) {
   try { writeFileSync(gi, (cur && !cur.endsWith("\n") ? cur + "\n" : cur) + PRIVATE_REL + "\n"); } catch {}
 }
 
+// The ledger is append-only, so two clones recording concurrently each add a row at EOF —
+// a plain 3-way merge collides there. `merge=union` tells git to keep BOTH sides instead of
+// raising a conflict, which is exactly right for an append log. Idempotent, like ignorePrivate.
+function ensureMergeUnion(r) {
+  const ga = join(r, ".gitattributes");
+  let cur = ""; try { cur = readFileSync(ga, "utf8"); } catch {}
+  const have = new Set(cur.split("\n").map((l) => l.trim()));
+  const add = [`${LEDGER_REL} merge=union`, `${PRIVATE_REL} merge=union`].filter((l) => !have.has(l));
+  if (!add.length) return;
+  try { writeFileSync(ga, (cur && !cur.endsWith("\n") ? cur + "\n" : cur) + add.join("\n") + "\n"); } catch {}
+}
+
 // ── git ───────────────────────────────────────────────────────────────────────
 // stderr ignored: every caller already treats a failure as "no answer", and a raw git error
 // leaking to a user's terminal (running outside a repo, say) reads as a crash in trailstone.
@@ -772,6 +784,7 @@ async function main(argv) {
     case "init": {
       mkdirSync(join(r, ".trailstone"), { recursive: true });
       if (!existsSync(join(r, LEDGER))) writeFileSync(join(r, LEDGER), HEADER);
+      ensureMergeUnion(r);
       if (f.goal) append(r, { kind: "goal", id: newId("g"), at: new Date().toISOString(), by: who(r), decision: String(f.goal) });
       console.log(`${LEDGER} ready — commit it. Decisions: \`decide "..." --why "..." --scope src/x.ts,src/y/\`${f.goal ? "" : `; set the goal: \`goal "<what this project is>"\``}`);
       console.log(`This ledger is committed and as public as the repo. A sensitive choice (secret, customer data, pricing, an unannounced plan) → \`decide "..." --private\`: it goes to .trailstone/private.yml, gitignored and never pushed, and still works locally.`); return;
@@ -1429,6 +1442,9 @@ function selfcheck() {
   }
   const old = append(dir, { id: "d_old", at: "2020-01-02T00:00:00Z", by: "t", decision: "sessions use JWT, not cookies", scope: ["src/auth/**"] });
   const ok = (c, m) => { if (!c) throw new Error("selfcheck FAIL: " + m); };
+  ensureMergeUnion(dir); ensureMergeUnion(dir); // writes .gitattributes for both ledgers; idempotent
+  { let ga = ""; try { ga = readFileSync(join(dir, ".gitattributes"), "utf8"); } catch {}
+    ok((ga.match(/decisions\.yml merge=union/g) || []).length === 1 && ga.includes("private.yml merge=union"), "ensureMergeUnion writes union attrs for both ledgers, without duplicating on re-run"); }
   ok(governing(load(dir), "src/auth/jwt.ts").length === 1 && governing(load(dir), "src/other.ts").length === 0, "glob governance");
   // Windows: relative() yields "src\\auth\\jwt.ts", which matches no forward-slash scope.
   ok(rel(dir, join(dir, "src", "auth", "jwt.ts")) === "src/auth/jwt.ts", `repo-relative paths are forward-slashed (got: ${rel(dir, join(dir, "src", "auth", "jwt.ts"))})`);

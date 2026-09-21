@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.4
+
+**Fixed — concurrent decisions from separate clones no longer conflict at merge.** The ledger is
+append-only, so two clones each recording a decision add a row at EOF and a plain 3-way merge
+collides there. `init` now writes a `.gitattributes` marking both ledgers `merge=union`, so git
+keeps both sides instead of raising a conflict — the standard fix for an append log. Idempotent;
+covered by `--selfcheck`. (Shared-worktree concurrent records were already safe via O_APPEND.)
+
+Also a republish: the 0.2.3 on npm had drifted behind the repo under the same version number.
+
 ## 0.2.3
 
 **Fixed — `.cursor/hooks/trailstone.sh` is committed, so it has to run on someone else's machine.**
