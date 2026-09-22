@@ -463,6 +463,20 @@ async function hook() {
     logShown(r, "edit", rv.decisions.length);
     return emit(event, `# Trailstone — governing ${f}\n` + [renderStale(st), renderRelevant(rv, "This file is governed by")].filter(Boolean).join("\n\n"));
   }
+  if (event === "Stop" && process.env.TRAILSTONE_CAPTURE === "inband") {
+    // Capture by the agent that is ALREADY running (its context, its model, its billing), instead
+    // of a second headless model. Claude Code's Stop hook may return decision:"block" — the agent
+    // continues with `reason` as its instruction; stop_hook_active marks that continuation, so
+    // this asks exactly once per turn. Experimental: measured against the judge before it is a default.
+    // ponytail: only turns that edited a file are asked; a talk-only decision turn is missed.
+    if (input.stop_hook_active || !input.transcript_path) process.exit(0);
+    let turn = null; try { turn = lastTurn(input.transcript_path); } catch {}
+    const touched = (turn?.files || []).map(rel).filter((f) => f && !f.startsWith(".."));
+    if (!touched.length) process.exit(0);
+    const gov = [...new Map(touched.flatMap((f) => governing(rows, f)).map((d) => [d.id, d])).values()];
+    process.stdout.write(JSON.stringify({ decision: "block", reason: inbandAsk(touched, gov) }));
+    process.exit(0);
+  }
   if (event === "Stop") {
     // Off by env, inside the judge's own session, or on a machine with no `claude` CLI.
     if (process.env.TRAILSTONE_CAPTURE === "0" || process.env.TRAILSTONE_CAPTURE_JUDGE || !input.transcript_path || !hasClaude()) process.exit(0);
@@ -554,6 +568,14 @@ ${userAsk || "(no prompt text)"}
 
 ASSISTANT TURN:
 ${assistant}`;
+
+// The in-band ask: the judge's rules, compressed, addressed to the agent that did the work.
+export const inbandAsk = (touched, gov) =>
+  `Trailstone, before you finish: did this turn COMMIT to a choice that rules out an alternative — one you made, or one the user stated and you acted on? ` +
+  `Only a commitment that later work rests on counts ("retries live in the client, not the server"). NOT: what you built or fixed, a tunable value, an observation, a deferral.\n` +
+  `For each, run: node "${SELF}" decide "<X, not Y>" --why "<why>" --scope <comma-separated files it GOVERNS, from: ${touched.join(", ")}> --proposed\n` +
+  (gov.length ? `Decisions in force on these files — if this turn departed from one, run: node "${SELF}" reverse <id> "<what it is now>" --proposed\n${gov.map((d) => `  [${d.id}] ${d.decision}`).join("\n")}\n` : "") +
+  `If there is nothing, record nothing. Either way, finish with one line: "Recorded: <ids>" or "No decision to record." Do not redo or extend the work.`;
 
 // transcript → the last turn: the user's ask, everything the assistant SAID (tool calls
 // are noise), and every file it wrote (each Edit/Write/NotebookEdit carries its path).
@@ -1580,6 +1602,20 @@ function selfcheck() {
     }
     const bad = spawnSync(process.execPath, [SELF, "hook"], { input: "not json {{{", encoding: "utf8" });
     ok(bad.status === 0 && !bad.stderr, "hook never blocks a prompt: malformed stdin");
+  }
+  { // In-band capture asks the running agent ONCE, and only after a turn that wrote a file.
+    const tp = join(dir, "inband-transcript.jsonl");
+    writeFileSync(tp, [{ type: "user", message: { content: "use postgres" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "done" }, { type: "tool_use", name: "Write", input: { file_path: join(dir, "src", "auth", "a.ts") } }] } }].map((x) => JSON.stringify(x)).join("\n"));
+    const stop = (extra) => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env: { ...process.env, TRAILSTONE_CAPTURE: "inband" },
+      input: JSON.stringify({ hook_event_name: "Stop", cwd: dir, transcript_path: tp, ...extra }) });
+    const first = stop({}), again = stop({ stop_hook_active: true });
+    const j = (() => { try { return JSON.parse(first.stdout); } catch { return {}; } })();
+    ok(first.status === 0 && j.decision === "block" && /decide/.test(j.reason) && /src\/auth\/a\.ts/.test(j.reason), "in-band Stop blocks once with a decide ask naming the touched file");
+    ok(again.status === 0 && !again.stdout, "in-band Stop never asks twice (stop_hook_active)");
+    writeFileSync(tp, JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "just talk" }] } }));
+    ok(!stop({}).stdout, "in-band Stop stays silent on a turn that wrote nothing");
+    rmSync(tp);
   }
   { // doctor: silence must never be mistaken for health. The trap is a session ABOVE the repo.
     const above = dirname(dir);
