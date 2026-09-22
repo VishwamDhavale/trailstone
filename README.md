@@ -148,7 +148,7 @@ the line to add instead of clobbering it).
 | `SessionStart` | One line: repo name, decisions in force, proposals pending — plus the stale block if any. |
 | `UserPromptSubmit` | Decisions relevant to *this* prompt: the ones governing files you already touched this session, then a lexical top-up (≥2 shared words) — each labelled with why it surfaced. Plus stale. Capped at 5 + 5 proposals, never padded; silent when nothing matches. |
 | `PreToolUse` (Edit/Write/MultiEdit/NotebookEdit) | Before the write lands: the decisions governing that exact file, and a stale warning if it has one. **Once per file per session** (remembered in a tmpfile, last 50 files), so a loop of edits does not repeat itself. |
-| `Stop` | Passive capture, **on by default**. Detaches immediately — the session never waits — and writes anything it judged a real decision as `status: proposed`. Needs the `claude` CLI on your PATH (without it the hook exits silently); `TRAILSTONE_CAPTURE=0` disables it. |
+| `Stop` | Capture. After a turn that wrote a file, it asks the agent **once** to record anything the turn committed to (`decide … --proposed`) — see *Recording decisions*. Claude Code labels this "Stop hook error occurred"; Trailstone's note beside it says it is not. `TRAILSTONE_CAPTURE=judge` swaps in the opt-in judge; `=0` turns capture off. |
 
 Budget: the caps above mean a typical injection is a handful of lines; the largest
 is SessionStart with a long stale list, which is one line per stale file. Nothing
@@ -248,19 +248,31 @@ trailstone reverse d_6d0bf686 "Sessions use a signed HttpOnly cookie, not a JWT 
 
 ## Recording decisions
 
-**Explicit first.** You run `decide` when you make a call. Your agent runs the same
-command the moment it says "decided" — the `trailstone-decide` skill in
-`.claude/skills/trailstone-decide/` tells it when and how. An explicit decision is a real
-choice that forecloses an alternative; state the alternative in the text
-("X, not Y") so the reversal reads as a diff.
+**The agent that is doing the work records it.** When a turn that wrote a file ends, the `Stop`
+hook asks the agent once: did this turn commit to a choice that rules out an alternative — its own
+or the user's? If so, record it with `decide "X, not Y" --scope <files> --proposed`; if not, say
+"No decision to record." No second model and no second call: it is one short extra reply in the
+session you are already running and paying for. Claude Code shows any Stop-hook ask as "Stop hook
+error occurred" — there is no output shape that avoids it — so Trailstone puts its own line beside
+it: *not an error — asking the agent to record this turn's decisions*. The `trailstone-decide` skill says the same for when a human or agent wants to record
+by hand. State the alternative in the text ("X, not Y") so a later reversal reads as a diff.
 
-**Passive second — and it is what actually fills the ledger.** The `Stop` hook is **on by
-default**: at the end of every turn it detaches a cheap `claude -p` judge (haiku, ~$0.05–0.10
-per turn) that appends anything that looks like a decision with `status: proposed`. It needs
-the `claude` CLI on your PATH; without it the hook exits silently. Turn it off with
-`TRAILSTONE_CAPTURE=0`. A judge run that dies (expired auth, timeout) is invisible by design — the
-worker is detached — so every run logs one line to `~/.trailstone/capture.log`; `capture-health`
-prints the last five and exits 1 if the last one failed.
+Why this and not a background judge: measured over 42 headless sessions, agents that choose
+something *themselves* (storage, pagination style, an id scheme) recorded it unasked only 3 times
+in 18 — asked once, they recorded 9 of 9, each naming what it rejected, with no false positives on
+typo and validation turns. The separate judge matched that recall at about twice the extra cost,
+with a false positive and duplicate rows. The same ask delivered earlier, at the turn's first edit
+(where no label appears), recorded unprompted decisions only 3 of 6 — asked at the end, the agent
+has just finished the choice; asked at the start, the note has faded by then. Turn capture off
+with `TRAILSTONE_CAPTURE=0`.
+
+**Opt-in: the capture judge.** `TRAILSTONE_CAPTURE=judge` adds a detached `claude -p` judge
+(haiku, ~$0.05–0.10 per turn, on your own `claude` login) at the end of every turn, appending
+anything that looks like a decision as `status: proposed`. It needs the `claude` CLI on your
+PATH; without it the hook exits silently. A judge run that dies (expired auth, timeout) is
+invisible by design — the worker is detached — so every run logs one line to
+`~/.trailstone/capture.log`; `capture-health` prints the last five and exits 1 if the last one
+failed.
 
 **If Trailstone seems quiet, run `doctor` before believing the ledger is empty.** Every hook here
 fails open — it can never block your prompt — which means a hook that is *blind* looks exactly
@@ -342,7 +354,7 @@ private repo. That is how a maintainer learns whether the fires were any good.
   principle (dependency cascade, servers, fuzzy gates).
 - **[AGENTS.md](AGENTS.md)** — instructions for AI agents contributing to this repo.
 - **[SECURITY.md](SECURITY.md)** — the whole surface, including the one thing that leaves
-  your machine (the optional capture judge).
+  your machine (the opt-in capture judge).
 
 The most useful thing you can send back is not a star — it is `trailstone report --anon`:
 how often the stale warning fired on your repo, and whether those fires were right.

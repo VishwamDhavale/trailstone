@@ -17,17 +17,21 @@ this file states its whole surface honestly.
 
 ## The one thing that leaves your machine
 
-**Passive capture is on by default, and it sends your session transcript to Anthropic.**
+**Nothing, by default.** The default capture asks your agent, at the end of a turn, to record
+the turn's decisions itself; it adds no call of its own. The opt-in capture judge is the exception:
 
-The `Stop` hook detaches a cheap judge that runs the `claude` CLI (`claude -p`, Haiku)
+**`TRAILSTONE_CAPTURE=judge` sends your session transcript to Anthropic.**
+
+With it set, the `Stop` hook detaches a cheap judge that runs the `claude` CLI (`claude -p`, Haiku)
 over the end of the turn to propose decisions the turn made. That call goes out through
 **your own `claude` CLI authentication**, to Anthropic's API, and the turn transcript is
 the input. Trailstone adds no key of its own and no third party.
 
-If that is not acceptable on your repo:
+It is off unless you set it:
 
 ```bash
-export TRAILSTONE_CAPTURE=0     # disables passive capture entirely
+export TRAILSTONE_CAPTURE=judge   # opt in to the judge
+export TRAILSTONE_CAPTURE=0       # disables capture entirely, including the end-of-turn ask
 ```
 
 It is also a silent no-op when the `claude` binary is not on your PATH. Everything

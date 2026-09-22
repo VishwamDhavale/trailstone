@@ -17,9 +17,9 @@
 //   stale          the pre-push guard (exit 1 when stale files exist)
 //   stats          how often the stale warning fired, and how it resolved (precision)
 //   hook           Claude Code hook dispatch (SessionStart, UserPromptSubmit, PreToolUse, and
-//                  Stop — which detaches a cheap haiku judge that appends what the turn
-//                  decided as `proposed`. On by default; TRAILSTONE_CAPTURE=0, or no `claude`
-//                  binary on PATH, turns it off.)
+//                  Stop — which asks the agent, once, to record what the turn decided as
+//                  `proposed`. TRAILSTONE_CAPTURE=judge swaps that for a detached haiku judge;
+//                  TRAILSTONE_CAPTURE=0 turns capture off.)
 //   mcp            an MCP server on stdio, so ANY MCP client (Claude Desktop, Cursor,
 //                  Codex, Windsurf) can read the ledger. Pull, not push: the agent has
 //                  to ask. Push (unasked, pre-edit) is Claude Code only — see `hook`.
@@ -463,23 +463,25 @@ async function hook() {
     logShown(r, "edit", rv.decisions.length);
     return emit(event, `# Trailstone — governing ${f}\n` + [renderStale(st), renderRelevant(rv, "This file is governed by")].filter(Boolean).join("\n\n"));
   }
-  if (event === "Stop" && process.env.TRAILSTONE_CAPTURE === "inband") {
+  if (event === "Stop" && captureMode() === "inband") {
     // Capture by the agent that is ALREADY running (its context, its model, its billing), instead
     // of a second headless model. Claude Code's Stop hook may return decision:"block" — the agent
     // continues with `reason` as its instruction; stop_hook_active marks that continuation, so
-    // this asks exactly once per turn. Experimental: measured against the judge before it is a default.
+    // this asks exactly once per turn. Claude Code labels EVERY Stop block "Stop hook error
+    // occurred" (no output shape avoids it), so systemMessage tells the user what it really is.
     // ponytail: only turns that edited a file are asked; a talk-only decision turn is missed.
     if (input.stop_hook_active || !input.transcript_path) process.exit(0);
     let turn = null; try { turn = lastTurn(input.transcript_path); } catch {}
     const touched = (turn?.files || []).map(rel).filter((f) => f && !f.startsWith(".."));
     if (!touched.length) process.exit(0);
     const gov = [...new Map(touched.flatMap((f) => governing(rows, f)).map((d) => [d.id, d])).values()];
-    process.stdout.write(JSON.stringify({ decision: "block", reason: inbandAsk(touched, gov) }));
+    process.stdout.write(JSON.stringify({ decision: "block", reason: inbandAsk(touched, gov), systemMessage: INBAND_NOTE }));
     process.exit(0);
   }
   if (event === "Stop") {
-    // Off by env, inside the judge's own session, or on a machine with no `claude` CLI.
-    if (process.env.TRAILSTONE_CAPTURE === "0" || process.env.TRAILSTONE_CAPTURE_JUDGE || !input.transcript_path || !hasClaude()) process.exit(0);
+    // The judge runs only when opted into (TRAILSTONE_CAPTURE=judge), never inside its own session,
+    // and never on a machine with no `claude` CLI.
+    if (captureMode() !== "judge" || process.env.TRAILSTONE_CAPTURE_JUDGE || !input.transcript_path || !hasClaude()) process.exit(0);
     if (!input.__worker) { // detach: the session never waits on the judge
       const c = spawn(process.execPath, [SELF, "hook"], { detached: true, stdio: ["pipe", "ignore", "ignore"] });
       c.stdin.end(JSON.stringify({ ...input, __worker: true })); c.unref(); process.exit(0);
@@ -497,6 +499,13 @@ async function hook() {
 // off; no `claude` on PATH is a silent no-op. Everything it writes is `proposed`, so a
 // wrong capture costs a line in a diff, never a gate.
 const JUDGE_MODEL = "claude-haiku-4-5-20251001";
+// Capture mode. DEFAULT is "inband": at Stop, the agent that is already running is asked once to
+// record its own decisions. "judge" opts into the detached second model (a headless `claude -p` per
+// turn, on the user's plan or key); "0" turns capture off. Measured 2026-09-23 (threadchat
+// eval/capture-inband, 42 sessions): same recall as the judge, fewer false positives, rows that name
+// the rejected alternative, ~half the extra cost. An ask at the first EDIT instead avoids Claude
+// Code's Stop label but recorded unprompted decisions 3/6 vs 9/9 (12 more sessions) — so, Stop.
+const captureMode = () => ({ "0": "off", judge: "judge" })[process.env.TRAILSTONE_CAPTURE] || "inband";
 const captureLog = () => join(homedir(), ".trailstone", "capture.log");
 // The Stop worker is DETACHED with stdio ignored, so a judge whose CLI auth lapsed dies
 // INVISIBLY (observed 2026-08-30). One line per run is the only trail; `capture-health` reads it.
@@ -569,6 +578,8 @@ ${userAsk || "(no prompt text)"}
 ASSISTANT TURN:
 ${assistant}`;
 
+// Shown to the USER beside Claude Code's "Stop hook error occurred" label: this is not an error.
+const INBAND_NOTE = "Trailstone: not an error — asking the agent to record this turn's decisions (TRAILSTONE_CAPTURE=0 turns this off)";
 // The in-band ask: the judge's rules, compressed, addressed to the agent that did the work.
 export const inbandAsk = (touched, gov) =>
   `Trailstone, before you finish: did this turn COMMIT to a choice that rules out an alternative — one you made, or one the user stated and you acted on? ` +
@@ -1175,7 +1186,9 @@ function doctor() {
   if (isShallow(r)) say(false, "SHALLOW clone — staleness cannot be computed without history; `git fetch --unshallow`");
 
   const last = (() => { try { return readFileSync(captureLog(), "utf8").trim().split("\n").at(-1); } catch { return null; } })();
-  console.log(last ? `  --  last capture judge run: ${last}` : "  --  the capture judge has never run here or anywhere");
+  const mode = captureMode();
+  console.log(`  --  capture: ${{ inband: "in-band (at Stop, the agent is asked once to record the turn's decisions)", judge: "opt-in judge (TRAILSTONE_CAPTURE=judge)", off: "off (TRAILSTONE_CAPTURE=0)" }[mode]}`);
+  if (mode === "judge") console.log(last ? `  --  last capture judge run: ${last}` : "  --  the capture judge has never run here or anywhere");
 
   if (bad.length) { console.error(`\n${bad.length} problem(s) — Trailstone is installed but not fully watching.`); process.exit(1); }
   console.log("\nTrailstone is watching this repo.");
@@ -1607,11 +1620,16 @@ function selfcheck() {
     const tp = join(dir, "inband-transcript.jsonl");
     writeFileSync(tp, [{ type: "user", message: { content: "use postgres" } },
       { type: "assistant", message: { content: [{ type: "text", text: "done" }, { type: "tool_use", name: "Write", input: { file_path: join(dir, "src", "auth", "a.ts") } }] } }].map((x) => JSON.stringify(x)).join("\n"));
-    const stop = (extra) => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env: { ...process.env, TRAILSTONE_CAPTURE: "inband" },
+    // PATH without any dir holding a `claude` binary: judge mode can never spawn a real (paid) judge here.
+    const noClaude = (process.env.PATH || "").split(process.platform === "win32" ? ";" : ":")
+      .filter((d) => !["claude", "claude.exe", "claude.cmd"].some((n) => existsSync(join(d, n)))).join(process.platform === "win32" ? ";" : ":");
+    const stop = (extra, mode = "") => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env: { ...process.env, TRAILSTONE_CAPTURE: mode, PATH: noClaude },
       input: JSON.stringify({ hook_event_name: "Stop", cwd: dir, transcript_path: tp, ...extra }) });
     const first = stop({}), again = stop({ stop_hook_active: true });
     const j = (() => { try { return JSON.parse(first.stdout); } catch { return {}; } })();
-    ok(first.status === 0 && j.decision === "block" && /decide/.test(j.reason) && /src\/auth\/a\.ts/.test(j.reason), "in-band Stop blocks once with a decide ask naming the touched file");
+    ok(first.status === 0 && j.decision === "block" && /decide/.test(j.reason) && /src\/auth\/a\.ts/.test(j.reason), "in-band (the DEFAULT) Stop blocks once with a decide ask naming the touched file");
+    ok(/not an error/.test(j.systemMessage || ""), "the block tells the user it is not an error (Claude Code labels every Stop block one)");
+    ok(!stop({}, "0").stdout && !stop({}, "judge").stdout, "TRAILSTONE_CAPTURE=0 and =judge never block at Stop");
     ok(again.status === 0 && !again.stdout, "in-band Stop never asks twice (stop_hook_active)");
     writeFileSync(tp, JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "just talk" }] } }));
     ok(!stop({}).stdout, "in-band Stop stays silent on a turn that wrote nothing");

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**Changed — capture no longer spends a second model by default.** The default is now *in-band*:
+when a turn that wrote a file ends, the `Stop` hook asks the agent that did the work, once, to
+record any decision the turn committed to (`decide … --proposed`) or to say there was none. The detached `claude -p` haiku judge at `Stop` — which ran on every
+turn, on the user's own plan or key, whether or not `claude` auth billed it the way they expected
+— is now opt-in: `TRAILSTONE_CAPTURE=judge`. `TRAILSTONE_CAPTURE=0` still turns capture off.
+`doctor` reports the mode. Measured first (threadchat `eval/capture-inband`, 42 sessions): same
+recall as the judge, no false positives on typo/validation turns (the judge had one), rows that name
+the rejected alternative, at about half the extra cost. Claude Code labels every Stop-hook block
+"Stop hook error occurred" and no output shape avoids it, so the block carries a `systemMessage`
+telling the user it is not an error. Asking at the turn's first edit instead avoids the label but
+recorded unprompted decisions 3/6 against 9/9 (12 more sessions), so the ask stays at Stop.
+
 **Fixed — the CI gate said "clean" on a shallow clone.** `actions/checkout` fetches one commit by
 default, so every file's last commit is the tip, every file reads as touched after the reversal, and
 `stale` printed `trailstone: clean.` over real stale files, exiting 0. `stale` now refuses on a shallow
