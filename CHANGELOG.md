@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+**Fixed — the CI gate said "clean" on a shallow clone.** `actions/checkout` fetches one commit by
+default, so every file's last commit is the tip, every file reads as touched after the reversal, and
+`stale` printed `trailstone: clean.` over real stale files, exiting 0. `stale` now refuses on a shallow
+clone when the ledger has a reversal to check (exit 1, naming `git fetch --unshallow` / `fetch-depth: 0`),
+and `doctor` reports it.
+
+**Fixed — a hand-edited ledger crashed `list`/`governing` or silently dropped decisions.** `scope:
+[src/api/]` (flow list) or `scope: src/api/` (one path) parsed as a string, and `list` died with
+`d.scope.join is not a function`. Both now read as lists, as do single-quoted scalars and a leading
+`---`. Any other line the parser cannot read is no longer skipped in silence: `stale` exits 1 naming each
+`file:line` (a dropped decision flags nothing, so it cannot pass as clean), and `doctor` reports them.
+Hooks still fail open.
+
 ## 0.2.4
 
 **Fixed — concurrent decisions from separate clones no longer conflict at merge.** The ledger is

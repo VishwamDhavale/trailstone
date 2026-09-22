@@ -142,6 +142,9 @@ function dirtyFiles(cwd) {
     return new Set(out.split("\n").filter(Boolean).map((l) => l.slice(3).replace(/^.* -> /, "")));
   } catch { return new Set(); }
 }
+// A shallow clone (actions/checkout's default, depth 1) makes every file's last commit the tip,
+// so every file reads "touched after the reversal" and `stale` said "clean" over real stale files.
+const isShallow = (cwd) => { try { return git(["rev-parse", "--is-shallow-repository"], cwd) === "true"; } catch { return false; } };
 function trackedFiles(cwd) {
   try { return git(["ls-files"], cwd).split("\n").filter(Boolean); } catch { return []; }
 }
@@ -151,7 +154,12 @@ const FIELDS = ["kind", "id", "at", "by", "decision", "why", "decisionId", "scop
 // Quote only when a plain scalar would be ambiguous — otherwise the diff stays readable.
 const q = (s) => (/^$|^[-?:,[\]{}#&*!|>'"%@`]|:\s|\s#|^\s|\s$|\n/.test(s) ||
   /^(true|false|null|yes|no|on|off|~|[-+]?(\d[\d_]*)(\.\d*)?([eE][-+]?\d+)?)$/i.test(s)) ? JSON.stringify(s) : s;
-const unq = (s) => { if (!s.startsWith('"')) return s; try { return JSON.parse(s); } catch { return s; } };
+const unq = (s) => {
+  if (/^'.*'$/.test(s)) return s.slice(1, -1).replace(/''/g, "'"); // hand-written; we never emit these
+  if (!s.startsWith('"')) return s; try { return JSON.parse(s); } catch { return s; }
+};
+// `scope: [a, "b"]` — the flow form a human hand-editing the ledger reaches for first.
+const flowList = (s) => (s.slice(1, -1).match(/"(?:[^"\\]|\\.)*"|'[^']*'|[^,]+/g) || []).map((x) => unq(x.trim())).filter(Boolean);
 
 export function yamlEmit(row) {
   const keys = [...FIELDS.filter((k) => k in row), ...Object.keys(row).filter((k) => !FIELDS.includes(k) && !k.startsWith("_"))];
@@ -167,18 +175,26 @@ export function yamlEmit(row) {
   return "-" + out.join("\n").slice(1) + "\n"; // first line becomes "- key: value"
 }
 
+// Lines it could not read are skipped AND counted on `.bad` (1-based line numbers): a dropped
+// decision is a missed flag, so the guard refuses to call a ledger with bad lines "clean".
 export function yamlParse(text) {
-  const rows = []; let cur = null, listKey = null, m;
+  const rows = [], bad = []; let cur = null, listKey = null, m, n = 0;
   for (const raw of text.split("\n")) {
+    n++;
     const l = raw.replace(/\s+$/, "");
-    if (!l.trim() || /^\s*#/.test(l)) continue; // blank + comment lines
+    if (!l.trim() || /^\s*#/.test(l) || l === "---") continue; // blank, comment, document start
     if ((m = l.match(/^-\s+([A-Za-z_][\w]*):(?:\s(.*))?$/))) { cur = {}; rows.push(cur); listKey = null; }
-    else if (cur && (m = l.match(/^\s{2,}-\s(.*)$/))) { if (listKey) cur[listKey].push(unq(m[1])); continue; }
-    else if (!cur || !(m = l.match(/^\s{2}([A-Za-z_][\w]*):(?:\s(.*))?$/))) { cur = null; listKey = null; continue; } // malformed → skip
-    // `wrong` is the ONE boolean key — every other scalar stays a string (see FIELDS).
-    if (m[2] == null || m[2] === "") { listKey = m[1]; cur[listKey] = []; } else { cur[m[1]] = m[1] === "wrong" ? m[2] === "true" : unq(m[2]); listKey = null; }
+    else if (cur && (m = l.match(/^\s{2,}-\s(.*)$/))) { listKey ? cur[listKey].push(unq(m[1])) : bad.push(n); continue; }
+    else if (!cur || !(m = l.match(/^\s{2}([A-Za-z_][\w]*):(?:\s(.*))?$/))) { cur = null; listKey = null; bad.push(n); continue; } // malformed → skip, counted
+    const v = m[2];
+    // `wrong` is the ONE boolean key and `scope` the ONE list — every other scalar stays a string (see FIELDS).
+    if (v == null || v === "") { listKey = m[1]; cur[listKey] = []; }
+    else if (m[1] === "scope") { cur.scope = /^\[.*\]$/.test(v) ? flowList(v) : [unq(v)]; listKey = null; } // `scope: src/x/` → one path
+    else { cur[m[1]] = m[1] === "wrong" ? v === "true" : unq(v); listKey = null; }
   }
-  return rows.filter((x) => typeof x.id === "string");
+  const out = rows.filter((x) => typeof x.id === "string");
+  out.bad = bad;
+  return out;
 }
 
 // ── ledger ────────────────────────────────────────────────────────────────────
@@ -187,9 +203,14 @@ export function load(r) {
   const hasPub = existsSync(pub), hasPriv = existsSync(priv);
   if (!hasPub && !hasPriv) return null;
   const rows = hasPub ? yamlParse(readFileSync(pub, "utf8")) : [];
+  rows.bad = (rows.bad || []).map((n) => `${LEDGER_REL}:${n}`); // "file:line", ready to print
   // Private rows are tagged (not serialized — yamlEmit skips `_` keys) so writes route back to
   // the right file and the guard can tell public from private.
-  if (hasPriv) for (const row of yamlParse(readFileSync(priv, "utf8"))) rows.push({ ...row, _private: true });
+  if (hasPriv) {
+    const pr = yamlParse(readFileSync(priv, "utf8"));
+    for (const row of pr) rows.push({ ...row, _private: true });
+    rows.bad.push(...pr.bad.map((n) => `${priv}:${n}`));
+  }
   return rows;
 }
 // priv=true routes the write to the private (never-pushed) ledger, creating + gitignoring it lazily.
@@ -881,7 +902,7 @@ async function main(argv) {
       if (prob) { console.log(`${prob}. Not answering "ungoverned" — that would read as "clear to proceed".`); return; }
       const g = governing(rows, rel(r, f)); logShown(r, "governing", g.length); g.length ? g.forEach((d) => console.log(line(d))) : console.log("ungoverned"); return;
     }
-    case "stale": { // the guard: exit 1 on stale, 0 clean, never fails closed (the ledger is local)
+    case "stale": { // the guard: exit 1 on stale (or unreadable: shallow history, a ledger line it could not parse), 0 clean
       // HARD STOP before anything else: the private ledger is meant to stay local. If it got
       // tracked, this pre-push run is about to publish it — the exact leak the feature prevents.
       if (privateInRepo() && existsSync(privatePath(r))) {
@@ -897,6 +918,20 @@ async function main(argv) {
       // repo whose ledger was never committed goes green forever, gating nothing, silently.
       // Still exit 0: a repo that never opted in must never be blocked. Just don't call it clean.
       if (!load(r)) { console.log(`no ledger here (${LEDGER} not found) — nothing to gate. This is NOT "clean": if you expected decisions, the ledger was never committed, or you are in the wrong directory.`); return; }
+      // A line the parser could not read may be a decision it dropped — and a dropped decision flags
+      // nothing. Say where, and do not let it pass as clean.
+      const unread = load(r).bad;
+      if (unread.length) {
+        console.error(`trailstone: could not read ${unread.length} ledger line(s) — a decision there is ignored, so its files are not checked:\n${unread.slice(0, 10).map((x) => `  ${x}`).join("\n")}\n  Each entry is "- key: value" with keys indented two spaces; scope is a "- path" list or [a, b].`);
+        if (st.length) console.error(renderStale(st));
+        process.exit(1);
+      }
+      // Same rule — never "clean" about ground we cannot see — but this one fails CLOSED: the repo
+      // opted in and has a reversal to check, and a shallow history hides exactly what it needs.
+      if (!st.length && load(r).some((x) => x.supersedes) && isShallow(r)) {
+        console.error(`trailstone: this is a SHALLOW clone, so every file's last commit looks newer than it is and stale files read as clean. Not answering "clean".\n  Fetch the history:  git fetch --unshallow\n  In GitHub Actions:  actions/checkout with \`fetch-depth: 0\``);
+        process.exit(1);
+      }
       if (!st.length) { console.log("trailstone: clean."); return; }
       console.error(renderStale(st)); process.exit(1);
     }
@@ -1078,6 +1113,7 @@ function doctor() {
   if (!rows) say(false, `no ledger — run \`init\` to create ${LEDGER}`);
   else {
     say(true, `${inForce(rows).length} decisions in force, ${proposed(rows).length} proposed${goal(rows) ? "" : " (no goal set — `goal \"<what this project is>\"`)"}`);
+    if (rows.bad.length) say(false, `ledger has ${rows.bad.length} line(s) it cannot read, so their decisions are ignored: ${rows.bad.slice(0, 5).join(", ")}`);
     try { git(["ls-files", "--error-unmatch", LEDGER], r); say(true, "ledger is committed, so it travels with a clone"); }
     catch {
       // Not tracked. That is a problem for a normal project — but deliberate if the ledger is
@@ -1114,6 +1150,7 @@ function doctor() {
   // whose entire job is telling you the truth about your setup, so its negatives must read negative.
   const pp = existsSync(join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push"));
   say(pp, pp ? "pre-push guard installed" : "NO pre-push guard — nothing blocks a stale push here; run `trailstone install` inside this repo");
+  if (isShallow(r)) say(false, "SHALLOW clone — staleness cannot be computed without history; `git fetch --unshallow`");
 
   const last = (() => { try { return readFileSync(captureLog(), "utf8").trim().split("\n").at(-1); } catch { return null; } })();
   console.log(last ? `  --  last capture judge run: ${last}` : "  --  the capture judge has never run here or anywhere");
@@ -1439,6 +1476,13 @@ function selfcheck() {
     if (JSON.stringify(got) !== JSON.stringify(nasty)) throw new Error("selfcheck FAIL: yaml round-trip\n" + one + JSON.stringify(got));
     const edited = "# a comment\n\n" + one.replace("  by: t\n", "  by: t\n\n  # mid-entry note\n");
     if (JSON.stringify(yamlParse(edited)) !== JSON.stringify([nasty])) throw new Error("selfcheck FAIL: comments/blank lines break the parse");
+    // Hand edits: a flow list or a bare scalar scope used to parse as a STRING and crash list/governing.
+    const hand = yamlParse(`---\n- id: d_a\n  decision: x\n  scope: [src/api/, "b c.ts", 'q.ts']\n- id: d_b\n  decision: y\n  scope: src/x/\n`);
+    if (JSON.stringify(hand.map((x) => x.scope)) !== JSON.stringify([["src/api/", "b c.ts", "q.ts"], ["src/x/"]]) || hand.bad.length)
+      throw new Error("selfcheck FAIL: flow-list / scalar scope not read as a list");
+    const broken = yamlParse(`- id: d_a\n  decision: x\n    indented: too far\n  why: |\n- id: d_b\n  decision: y\n`);
+    if (JSON.stringify(broken.bad) !== JSON.stringify([3, 4]) || broken.length !== 2) // line 4 is orphaned by line 3
+      throw new Error("selfcheck FAIL: an unreadable line must be counted on .bad, not silently dropped");
   }
   const old = append(dir, { id: "d_old", at: "2020-01-02T00:00:00Z", by: "t", decision: "sessions use JWT, not cookies", scope: ["src/auth/**"] });
   const ok = (c, m) => { if (!c) throw new Error("selfcheck FAIL: " + m); };
@@ -1645,6 +1689,28 @@ function selfcheck() {
       ok(p3.status === 0, "stale on a repo with no ledger still exits 0 (never block an opt-out repo)");
       ok(/no ledger here/.test(p3.stdout) && !/clean/.test(p3.stdout.replace(/NOT "clean"/, "")), "stale on a repo with no ledger does NOT report 'clean'");
       rmSync(d3, { recursive: true, force: true });
+    }
+    // A shallow clone (actions/checkout's default) made every file look freshly committed, so the
+    // CI gate printed "clean" over a real stale file. It must refuse instead.
+    {
+      const d5 = join(tmpdir(), `trailstone-shallow-${Date.now()}`), d6 = d5 + "-clone"; mkdirSync(join(d5, "src"), { recursive: true });
+      const gg = (...a) => git(a, d5);
+      gg("init", "-q"); gg("config", "user.email", "t@t"); gg("config", "user.name", "t");
+      writeFileSync(join(d5, "src", "a.ts"), "a"); gg("add", ".");
+      spawnSync("git", ["commit", "-qm", "old"], { cwd: d5, env: { ...process.env, GIT_AUTHOR_DATE: "2020-06-01T00:00:00Z", GIT_COMMITTER_DATE: "2020-06-01T00:00:00Z" } });
+      mkdirSync(join(d5, ".trailstone")); writeFileSync(join(d5, LEDGER), HEADER +
+        yamlEmit({ id: "d_o", at: "2020-01-01T00:00:00Z", by: "t", decision: "old", scope: ["src/"] }) +
+        yamlEmit({ id: "d_n", at: "2021-01-01T00:00:00Z", by: "t", decision: "new", scope: ["src/"], supersedes: "d_o" }));
+      gg("add", "."); gg("commit", "-qm", "ledger");
+      const st = (cwd) => spawnSync(process.execPath, [SELF, "stale"], { cwd, encoding: "utf8" });
+      ok(st(d5).status === 1, "full history: the file committed before the reversal is stale");
+      spawnSync("git", ["clone", "-q", "--depth", "1", "file://" + (d5.startsWith("/") ? "" : "/") + toPosix(d5), d6]);
+      const s6 = st(d6);
+      ok(s6.status === 1 && /SHALLOW/.test(s6.stderr) && !/clean/.test(s6.stdout), "a shallow clone does NOT report 'clean' — it refuses, exit 1");
+      writeFileSync(join(d6, LEDGER), readFileSync(join(d6, LEDGER), "utf8").replace(/  supersedes: d_o\n/, "  supersedes: d_o\n    stray: indented too far\n"));
+      const s7 = st(d6);
+      ok(s7.status === 1 && /could not read 1 ledger line/.test(s7.stderr) && /decisions\.yml:\d+/.test(s7.stderr), "an unreadable ledger line fails the guard and names file:line");
+      rmSync(d5, { recursive: true, force: true }); rmSync(d6, { recursive: true, force: true });
     }
 
     // Cursor hooks. The rule that matters: this thing sits in front of every tool call in the
