@@ -81,7 +81,7 @@ globally costs nothing on repos that never opted in.
 ```yaml
 - uses: actions/checkout@v4
   with: { fetch-depth: 0 }      # the guard compares commit dates; it needs the history
-- uses: vishwamdhavale/trailstone@v0.2.4
+- uses: vishwamdhavale/trailstone@v0.2.5
 ```
 
 ## The convention

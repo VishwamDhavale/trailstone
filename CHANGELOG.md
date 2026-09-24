@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.5
 
 **Changed — capture no longer spends a second model by default.** The default is now *in-band*:
 when a turn that wrote a file ends, the `Stop` hook asks the agent that did the work, once, to
