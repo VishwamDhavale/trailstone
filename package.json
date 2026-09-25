@@ -1,6 +1,6 @@
 {
   "name": "trailstone",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "A decision ledger that lives in your repo. When a decision is reversed, it names exactly which files are now suspect \u2014 at edit time, and at the push.",
   "keywords": [
     "adr",
