@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**Fixed — a decision reversed while an agent works now reaches that agent's in-progress files.** With
+several agents in one repo, one agent (or a human) reversing a decision reached every agent that
+started a file afterwards — but an agent already mid-file kept the old rule, silently: the edit hook
+spoke once per file per session, and `stale` skips uncommitted files, then reads the later commit as
+"addressed" (0/3 such agents switched; threadchat `eval/reversal-midwork`, where updating CLAUDE.md
+reached 0/9 running agents). Two changes: the edit hook now re-fires whenever the set of decisions
+governing a file has changed since the agent last saw it, naming `was → now`; and at `Stop`, if a
+decision governing any file the agent edited this session moved after it last saw that file, the
+agent is asked once — before the turn ends, while it can still fix it — to re-check those files
+(combined with the in-band capture ask when both apply).
+
 **Fixed — on a busy file, the edit hook silently dropped the rules that mattered.** Before an edit,
 the hook listed the decisions governing the file in ledger order and cut at 5. With a real-sized
 ledger that means the 5 *oldest* broad rules: on a docs page 10 decisions governed, and a newer

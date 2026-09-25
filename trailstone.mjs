@@ -421,6 +421,26 @@ function renderRelevant({ decisions, proposed: p, more = 0 }, heading, moreCmd =
 // ── hooks ─────────────────────────────────────────────────────────────────────
 const sessFile = (sid, tag) => join(tmpdir(), `trailstone-${tag}-${String(sid || "nosession").replace(/[^a-zA-Z0-9_-]/g, "")}.json`);
 const readJson = (p, d) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return d; } };
+// The rule set an agent was shown for a file: ids of the decisions governing it. A different set
+// later means the rules moved under the agent while it worked.
+const govSig = (rows, f) => governing(rows, f).map((d) => d.id).sort().join(",");
+// "was → now" for every decision in the old set that is no longer in force, following the
+// supersession chain to whatever replaced it; plus any decision that newly governs the file.
+function renderDrift(rows, f, was) {
+  const byId = new Map(rows.map((x) => [x.id, x])), now = governing(rows, f), nowIds = new Set(now.map((d) => d.id)), prev = new Set(was.split(",").filter(Boolean));
+  const out = [], replaced = new Set();
+  for (const id of prev) {
+    if (nowIds.has(id)) continue;
+    let cur = id, next;
+    for (let i = 0; i < 50 && (next = rows.find((x) => x.supersedes === cur && (x.kind ?? "decision") === "decision" && !x.status)); i++) cur = next.id;
+    if (cur !== id && nowIds.has(cur)) replaced.add(cur);
+    out.push(`  - ${f}: was "${byId.get(id)?.decision ?? id}" → now "${cur !== id && nowIds.has(cur) ? byId.get(cur).decision : "(no longer in force)"}"`);
+  }
+  for (const d of now) if (!prev.has(d.id) && !replaced.has(d.id)) out.push(`  - ${f}: new "${d.decision}"`);
+  return out;
+}
+const DRIFT_HEAD = "⚠️ CHANGED WHILE YOU WORKED — a decision governing a file you already edited this session is no longer the one you were shown. What you wrote there followed the old rule:\n";
+const DRIFT_NOTE = "Trailstone: not an error — a decision was reversed while the agent worked; asking it to re-check the files it edited";
 const emit = (event, ctx) => { if (ctx) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: ctx } })); process.exit(0); };
 
 async function hook() {
@@ -466,16 +486,41 @@ async function hook() {
     if (!fp) process.exit(0);
     const f = rel(fp);
     if (!f || f.startsWith("..")) process.exit(0);
-    const sf = sessFile(input.session_id, "edit"), seen = readJson(sf, []);
-    if (seen.includes(f)) process.exit(0); // once per (session, file)
-    try { writeFileSync(sf, JSON.stringify([...seen, f].slice(-50))); } catch {}
+    const sf = sessFile(input.session_id, "edit"), touched = readJson(sf, []);
+    if (!touched.includes(f)) try { writeFileSync(sf, JSON.stringify([...touched, f].slice(-50))); } catch {}
+    // Once per (session, file, rule set) — not once per (session, file): a decision reversed while
+    // this agent works must reach its NEXT edit of a file it already touched. Once-per-file left an
+    // agent mid-file on the old rule, unflagged (reversal-midwork eval, 2026-09-25: 0/3).
+    const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), key = `${r}\u0000${f}`, sig = govSig(rows, f);
+    if (seen[key] === sig) process.exit(0);
+    const drift = key in seen ? renderDrift(rows, f, seen[key]) : [];
+    try { writeFileSync(kf, JSON.stringify(Object.fromEntries([...Object.entries(seen).filter(([k]) => k !== key).slice(-49), [key, sig]]))); } catch {}
     // The edit is the moment a rule is needed, and a one-line rule is cheap: a wider cap than the
     // prompt surface, whose matches are lexical guesses.
     const rv = relevant(rows, { files: [f], cap: 10 }), st = stale(r, rows).filter((s) => s.file === f);
-    if (!rv.decisions.length && !rv.proposed.length && !st.length) process.exit(0);
+    if (!drift.length && !rv.decisions.length && !rv.proposed.length && !st.length) process.exit(0);
     logFires(r, st, "edit");
     logShown(r, "edit", rv.decisions.length);
-    return emit(event, `# Trailstone — governing ${f}\n` + [renderStale(st), renderRelevant(rv, "This file is governed by", `governing ${f}`)].filter(Boolean).join("\n\n"));
+    return emit(event, `# Trailstone — governing ${f}\n` + [drift.length ? DRIFT_HEAD + drift.join("\n") : "", renderStale(st), renderRelevant(rv, "This file is governed by", `governing ${f}`)].filter(Boolean).join("\n\n"));
+  }
+  // A decision governing a file this agent edited was reversed AFTER it last saw that file's rules:
+  // its work there followed the old rule, it is uncommitted (so `stale` skips it) and will be
+  // committed after the reversal (so `stale` reads it as addressed). The agent that wrote it is
+  // still here — ask it before the turn ends. Once: the continuation carries stop_hook_active.
+  if (event === "Stop" && !input.stop_hook_active && input.session_id) {
+    const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), mine = `${r}\u0000`;
+    const moved = Object.entries(seen).filter(([k, s]) => k.startsWith(mine) && govSig(rows, k.slice(mine.length)) !== s);
+    if (moved.length) {
+      const lines = moved.flatMap(([k, s]) => renderDrift(rows, k.slice(mine.length), s));
+      try { writeFileSync(kf, JSON.stringify({ ...seen, ...Object.fromEntries(moved.map(([k]) => [k, govSig(rows, k.slice(mine.length))])) })); } catch {}
+      let also = "";
+      if (captureMode() === "inband" && input.transcript_path) try {
+        const t = (lastTurn(input.transcript_path)?.files || []).map(rel).filter((f) => f && !f.startsWith(".."));
+        if (t.length) also = "\n\nThen, separately: " + inbandAsk(t, [...new Map(t.flatMap((f) => governing(rows, f)).map((d) => [d.id, d])).values()]);
+      } catch {}
+      process.stdout.write(JSON.stringify({ decision: "block", reason: DRIFT_HEAD + lines.join("\n") + "\nRe-check each file against the new decision and fix what still follows the old one, then say what you changed." + also, systemMessage: DRIFT_NOTE }));
+      process.exit(0);
+    }
   }
   if (event === "Stop" && captureMode() === "inband") {
     // Capture by the agent that is ALREADY running (its context, its model, its billing), instead
@@ -1634,6 +1679,28 @@ function selfcheck() {
     }
     const bad = spawnSync(process.execPath, [SELF, "hook"], { input: "not json {{{", encoding: "utf8" });
     ok(bad.status === 0 && !bad.stderr, "hook never blocks a prompt: malformed stdin");
+  }
+  { // Reversal mid-work (reversal-midwork eval): the edit hook re-fires when a file's rules change, and
+    // Stop asks once about files whose rules moved after the agent last saw them.
+    const d5 = join(tmpdir(), `trailstone-drift-${Date.now()}`); mkdirSync(join(d5, "src"), { recursive: true });
+    const g5 = (...a) => spawnSync("git", a, { cwd: d5, encoding: "utf8" });
+    g5("init", "-q"); writeFileSync(join(d5, "src", "a.ts"), "a"); writeFileSync(join(d5, "src", "b.ts"), "b");
+    mkdirSync(join(d5, ".trailstone")); writeFileSync(join(d5, LEDGER), HEADER);
+    append(d5, { id: "d_iso", at: "2025-01-01T00:00:00Z", by: "t", decision: "timestamps are ISO strings", scope: ["src/"] });
+    g5("add", "-A"); g5("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x");
+    const sid = `drift-${Date.now()}`, env = { ...process.env, TRAILSTONE_CAPTURE: "0", TRAILSTONE_FIRES_LOG: join(d5, "f.log"), TRAILSTONE_SHOWN_LOG: join(d5, "s.log") };
+    const hk = (input) => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env, input: JSON.stringify({ cwd: d5, session_id: sid, ...input }) }).stdout;
+    const edit = (f) => { const o = hk({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: join(d5, f) } }); try { return JSON.parse(o).hookSpecificOutput.additionalContext; } catch { return o; } };
+    ok(/ISO strings/.test(edit("src/a.ts")) && edit("src/a.ts") === "", "edit hook: first edit shows the rules, a second edit with the same rules is silent");
+    ok(/ISO strings/.test(edit("src/b.ts")), "edit hook: another file shows its rules");
+    append(d5, { id: "d_ms", at: "2025-02-01T00:00:00Z", by: "t", decision: "timestamps are epoch ms", scope: ["src/"], supersedes: "d_iso" });
+    const again = edit("src/a.ts");
+    ok(/CHANGED WHILE YOU WORKED/.test(again) && /was "timestamps are ISO strings" → now "timestamps are epoch ms"/.test(again), "edit hook re-fires after a reversal mid-work, naming was → now");
+    const stop = (extra = {}) => { try { return JSON.parse(hk({ hook_event_name: "Stop", ...extra })); } catch { return {}; } };
+    const s1 = stop();
+    ok(s1.decision === "block" && /src\/b\.ts/.test(s1.reason) && !/src\/a\.ts/.test(s1.reason) && /not an error/.test(s1.systemMessage || ""), "Stop asks about the file whose rules moved since the agent last saw them (b), not the one it was already re-shown (a)");
+    ok(!stop().decision && !stop({ stop_hook_active: true }).decision, "Stop asks about a drift once, and never on the continuation");
+    rmSync(d5, { recursive: true, force: true });
   }
   { // In-band capture asks the running agent ONCE, and only after a turn that wrote a file.
     const tp = join(dir, "inband-transcript.jsonl");
