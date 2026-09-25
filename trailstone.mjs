@@ -1763,7 +1763,10 @@ function selfcheck() {
     // the typed path. Every hook fell silent there (CI macOS/Windows since 0.2.5). Skipped where symlinks need privileges.
     const real7 = join(tmpdir(), `trailstone-real-${Date.now()}`), link7 = `${real7}-link`; mkdirSync(join(real7, "src"), { recursive: true });
     let linked = false; try { symlinkSync(real7, link7, "dir"); linked = true; } catch {}
-    if (linked) ok(repoRel(realpathSync.native(real7), join(link7, "src", "new.ts")) === "src/new.ts" && repoRel(real7, "/elsewhere/x.ts").startsWith(".."), "paths through a symlink resolve inside the repo (even a file not written yet); outside stays outside");
+    if (linked) {
+      const inside = repoRel(realpathSync.native(real7), join(link7, "src", "new.ts")), outside = repoRel(real7, join(tmpdir(), "elsewhere", "x.ts"));
+      ok(inside === "src/new.ts" && outside.startsWith(".."), `paths through a symlink resolve inside the repo (even a file not written yet); outside stays outside — got ${JSON.stringify({ inside, outside, real: realpathSync.native(real7), viaLink: realOf(join(link7, "src")) })}`);
+    }
     rmSync(link7, { force: true }); rmSync(real7, { recursive: true, force: true });
   }
   { // Worktrees (reversal-midwork, worktree variant): a reversal committed on the default branch binds in a
