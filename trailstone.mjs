@@ -367,18 +367,29 @@ export function staleRelevant(file, touched, prompt) {
   return file.toLowerCase().split(/[\/.]/).filter((seg) => seg.length > 3 && seg !== "src").some((seg) => p.includes(seg));
 }
 
+// How narrowly a scope names this file: an exact path beats a deep directory beats a shallow one,
+// and a glob ranks just below a directory of the same depth. -1 when no entry matches.
+const specificity = (scope, f) => Math.max(-1, ...(scope || []).filter((p) => matches(p, f))
+  .map((p) => (p === f ? 1e6 : p.replace(/\/+$/, "").split("/").length * 2 - (/[*?[]/.test(p) ? 1 : 0))));
+
 // Surfacing: decisions governing the files in hand, then a lexical top-up from
-// the prompt (≥2 shared words, len>3). Each item says why. Capped, never padded.
+// the prompt (≥2 shared words, len>3). Each item says why. Capped, never padded — and never
+// silently: `more` counts what the cap left out. Governing decisions rank most specific scope
+// first, then newest: ledger order let the 5 OLDEST `docs/` rules win on a docs page and cut a
+// newer one the agent then broke (write-time-30 eval, 2026-09-25: 10 govern a docs page).
 export function relevant(rows, { files = [], q = "", cap = 5 } = {}) {
   const seen = new Map();
-  for (const f of files) for (const d of governing(rows, f)) if (!seen.has(d.id)) seen.set(d.id, { ...d, because: `scope: ${f}` });
+  const gov = files.flatMap((f) => governing(rows, f).map((d) => ({ d, f, s: specificity(d.scope, f) })));
+  gov.sort((a, b) => b.s - a.s || String(b.d.at).localeCompare(String(a.d.at)));
+  for (const { d, f } of gov) if (!seen.has(d.id)) seen.set(d.id, { ...d, because: `scope: ${f}` });
   const words = new Set((q.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []));
   if (words.size) for (const d of inForce(rows)) {
     if (seen.has(d.id)) continue;
     const hit = (d.decision.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []).filter((w) => words.has(w));
     if (new Set(hit).size >= 2) seen.set(d.id, { ...d, because: `prompt: ${[...new Set(hit)].slice(0, 3).join(" ")}` });
   }
-  return { decisions: [...seen.values()].slice(0, cap), proposed: proposed(rows).filter((p) => !files.length || files.some((f) => scopeHits(p.scope, f))).slice(0, cap) };
+  const all = [...seen.values()];
+  return { decisions: all.slice(0, cap), more: Math.max(0, all.length - cap), proposed: proposed(rows).filter((p) => !files.length || files.some((f) => scopeHits(p.scope, f))).slice(0, cap) };
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────────
@@ -391,8 +402,9 @@ function renderStale(list) {
     "\n  Reconcile: redo the file to match the current decision and commit — or, if the CLI is on your PATH, `trailstone validate <decision-id-shown-above> --scope <file>` when you re-checked and it holds, `... --wrong` when the file never rested on that decision, or `trailstone reverse <id> \"...\"` to change the decision back." +
     "\n  Note: ANY commit that touches the file clears this flag — even one unrelated to the reversal. So actually reconciling the file is on you; a passing commit is not proof it was addressed. Tell the user what changed, what you re-checked, and what you propose.";
 }
-function renderRelevant({ decisions, proposed: p }, heading) {
+function renderRelevant({ decisions, proposed: p, more = 0 }, heading, moreCmd = "list") {
   const parts = [];
+  if (more) decisions = [...decisions, { decision: `…and ${more} more in force here — \`node "${SELF_CMD}" ${moreCmd}\` lists every one` }];
   // Honoring a decision is the easy half. The half that actually happens is the user asking
   // for something a decision forbids — and with no instruction for it, a weaker agent just
   // complies and the ledger records nothing (portal organic run, 2026-09-09, arm A1).
@@ -457,11 +469,13 @@ async function hook() {
     const sf = sessFile(input.session_id, "edit"), seen = readJson(sf, []);
     if (seen.includes(f)) process.exit(0); // once per (session, file)
     try { writeFileSync(sf, JSON.stringify([...seen, f].slice(-50))); } catch {}
-    const rv = relevant(rows, { files: [f] }), st = stale(r, rows).filter((s) => s.file === f);
+    // The edit is the moment a rule is needed, and a one-line rule is cheap: a wider cap than the
+    // prompt surface, whose matches are lexical guesses.
+    const rv = relevant(rows, { files: [f], cap: 10 }), st = stale(r, rows).filter((s) => s.file === f);
     if (!rv.decisions.length && !rv.proposed.length && !st.length) process.exit(0);
     logFires(r, st, "edit");
     logShown(r, "edit", rv.decisions.length);
-    return emit(event, `# Trailstone — governing ${f}\n` + [renderStale(st), renderRelevant(rv, "This file is governed by")].filter(Boolean).join("\n\n"));
+    return emit(event, `# Trailstone — governing ${f}\n` + [renderStale(st), renderRelevant(rv, "This file is governed by", `governing ${f}`)].filter(Boolean).join("\n\n"));
   }
   if (event === "Stop" && captureMode() === "inband") {
     // Capture by the agent that is ALREADY running (its context, its model, its billing), instead
@@ -1539,6 +1553,11 @@ function selfcheck() {
   ok(inForce(load(dir)).length === 1, "a goal row is not a decision");
   ok(staleRelevant("src/auth/session.ts", [], "add a POST /logout endpoint in src/auth") && !staleRelevant("src/auth/session.ts", [], "fix the typo in src/ui/banner.ts") && staleRelevant("src/auth/session.ts", ["src/auth/session.ts"], "anything"), "prompt push is relevance-gated");
   ok(relevant(load(dir), { q: "how do sessions handle cookies here" }).decisions[0]?.id === "d_new", "lexical relevance");
+  // Ledger scale (write-time-30): exact file → deeper dir → newer broad rule → older broad rule, and the cut is named.
+  const R = (id, at, scope) => ({ id, at, by: "t", decision: `rule ${id}`, scope });
+  const big = [R("b_old", "2024-01-01", ["docs/"]), R("b_new", "2025-01-01", ["docs/"]), R("c_dir", "2023-01-01", ["docs/cookbooks/"]), R("x_file", "2022-01-01", ["docs/cookbooks/a.mdx"]), R("o", "2025-06-01", ["src/"])];
+  const rk = relevant(big, { files: ["docs/cookbooks/a.mdx"], cap: 3 });
+  ok(rk.decisions.map((d) => d.id).join() === "x_file,c_dir,b_new" && rk.more === 1 && renderRelevant(rk, "h", "governing docs/cookbooks/a.mdx").includes("1 more in force here"), "relevance ranks specific-then-newest and names what the cap cut");
   writeFileSync(join(dir, "src", "auth", "jwt.ts"), "dirty"); ok(stale(dir).length === 0, "working-tree edit clears");
   g("checkout", "--", "src/auth/jwt.ts"); ok(stale(dir).length === 1, "revert restores the flag");
   append(dir, { kind: "validation", id: "v_1", at: "2022-01-01T00:00:00Z", by: "t", decisionId: "d_old", scope: ["src/auth/jwt.ts"] });

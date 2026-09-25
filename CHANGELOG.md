@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**Fixed — on a busy file, the edit hook silently dropped the rules that mattered.** Before an edit,
+the hook listed the decisions governing the file in ledger order and cut at 5. With a real-sized
+ledger that means the 5 *oldest* broad rules: on a docs page 10 decisions governed, and a newer
+`docs/` rule never reached the agent, which then broke it (2/6 followed vs 6/6 with the same rules in
+CLAUDE.md; threadchat `eval/write-time-30`). Governing decisions now rank the most specific scope
+first (exact file, then the deepest directory), then newest; the edit hook shows up to 10; and
+whatever the cap leaves out is named — `…and N more in force here — trailstone governing <file>` —
+instead of disappearing.
+
 ## 0.2.5
 
 **Changed — capture no longer spends a second model by default.** The default is now *in-band*:
