@@ -6,8 +6,10 @@ this file states its whole surface honestly.
 ## What it touches
 
 - **Reads and writes one file in your repo:** `.trailstone/decisions.yml`.
-- **Runs `git`** (read-only, except `.git/hooks/pre-push` which `install` writes).
-- **Writes `~/.claude/settings.json`** when you run `install`, to register four hooks.
+- **Runs `git`**: read-only, except `.git/hooks/pre-push` (written by `install`) and a `git fetch`
+  of your `origin` remote's default branch into its remote-tracking ref (see below).
+- **Writes `~/.claude/settings.json`** when you run `install`, to register four hooks — and
+  `~/.codex/hooks.json` too if you have Codex, which runs them only after you trust them in `/hooks`.
   It appends its own entries; it does not remove yours. If a `pre-push` hook already
   exists in your repo, it prints the line to add rather than clobbering the file.
 - **Appends a local log:** `~/.trailstone/fires.log` and `~/.trailstone/capture.log`
@@ -15,10 +17,17 @@ this file states its whole surface honestly.
 - **No server, no account, no token, no telemetry.** Nothing is reported to us, ever.
   The precision numbers only reach us if *you* choose to paste `report --anon`.
 
-## The one thing that leaves your machine
+## What leaves your machine
 
-**Nothing, by default.** The default capture asks your agent, at the end of a turn, to record
-the turn's decisions itself; it adds no call of its own. The opt-in capture judge is the exception:
+**A `git fetch` to your own remote.** So that a decision reversed in another clone reaches agents here,
+the hooks fetch `origin`'s default branch (one ref, no tags): in the background at most every 30 s,
+and with a 5 s cap at the end of a turn and in the pre-push guard. It goes only to the remote you
+already have, with your existing git credentials, and it never prompts (`GIT_TERMINAL_PROMPT=0`,
+SSH `BatchMode`, `credential.interactive=never`); offline or unauthenticated, it just fails and
+everything else carries on. `TRAILSTONE_FETCH=0` turns it off. Nothing is sent to us.
+
+**Capture adds nothing by default.** The default capture asks your agent, at the end of a turn, to
+record the turn's decisions itself; it adds no call of its own. The opt-in capture judge is the exception:
 
 **`TRAILSTONE_CAPTURE=judge` sends your session transcript to Anthropic.**
 
@@ -35,7 +44,8 @@ export TRAILSTONE_CAPTURE=0       # disables capture entirely, including the end
 ```
 
 It is also a silent no-op when the `claude` binary is not on your PATH. Everything
-else — recording, surfacing, staleness, the push guard — works fully offline.
+else — recording, surfacing, staleness, the push guard — works fully offline (without the fetch,
+a reversal pushed from another clone is seen once you pull).
 
 ## The ledger is as public as the repo it lives in
 

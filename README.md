@@ -63,7 +63,7 @@ described. Scope the docs you want watched, and treat the rest as your job.
 ```bash
 npm i -g trailstone                 # or use npx trailstone <command> everywhere below
 cd your-repo                        # install must run INSIDE the repo
-trailstone install                  # Claude Code hooks (global) + this repo's pre-push guard + AGENTS.md
+trailstone install                  # Claude Code (+ Codex) hooks, global + this repo's pre-push guard + AGENTS.md
 trailstone init --goal "what this project is"
 git add .trailstone AGENTS.md && git commit -m "trailstone: ledger"
 trailstone doctor                   # confirms it is actually watching
@@ -139,20 +139,30 @@ the `scope` they re-checked, plus `wrong: true` for a false-positive fire.
 
 ## What the hooks do
 
-`install` adds four Claude Code hooks to `~/.claude/settings.json` and writes
-`.git/hooks/pre-push` in the current repo (if a pre-push already exists it prints
-the line to add instead of clobbering it).
+`install` adds four Claude Code hooks to `~/.claude/settings.json` — and, if you have Codex, the
+same four to `~/.codex/hooks.json` — and writes `.git/hooks/pre-push` in the current repo (if a
+pre-push already exists it prints the line to add instead of clobbering it). **Codex runs new hooks
+only after you trust them:** open `codex`, run `/hooks`, and trust the trailstone entries (once, and
+again after an upgrade changes them).
 
 | Hook | What it injects |
 |---|---|
 | `SessionStart` | One line: repo name, decisions in force, proposals pending — plus the stale block if any. |
 | `UserPromptSubmit` | Decisions relevant to *this* prompt: the ones governing files you already touched this session, then a lexical top-up (≥2 shared words) — each labelled with why it surfaced. Plus stale. Capped at 5 + 5 proposals, never padded; silent when nothing matches. |
-| `PreToolUse` (Edit/Write/MultiEdit/NotebookEdit) | Before the write lands: the decisions governing that exact file, and a stale warning if it has one. **Once per file per session** (remembered in a tmpfile, last 50 files), so a loop of edits does not repeat itself. |
-| `Stop` | Capture. After a turn that wrote a file, it asks the agent **once** to record anything the turn committed to (`decide … --proposed`) — see *Recording decisions*. Claude Code labels this "Stop hook error occurred"; Trailstone's note beside it says it is not. `TRAILSTONE_CAPTURE=judge` swaps in the opt-in judge; `=0` turns capture off. |
+| `PreToolUse` (Edit/Write/MultiEdit/NotebookEdit; Codex `apply_patch`) | Before the write lands: the decisions governing each file it touches — most specific scope first, then newest, up to 10, naming any it leaves out — and a stale warning if it has one. **Once per file per rule set per session**: silent on repeat edits, but if a decision governing the file changes while the agent works (someone reversed it mid-session), the next edit says `was → now`. |
+| `Stop` | **Drift check:** if a decision governing any file the agent edited this session was reversed after it last saw that file's rules, the agent is asked **once** to re-check those files before the turn ends. **Capture:** after a turn that wrote a file, it asks the agent **once** to record anything the turn committed to (`decide … --proposed`) — see *Recording decisions*. Claude Code labels these "Stop hook error occurred"; Trailstone's note beside it says it is not. `TRAILSTONE_CAPTURE=judge` swaps in the opt-in judge; `=0` turns capture off. |
 
 Budget: the caps above mean a typical injection is a handful of lines; the largest
 is SessionStart with a long stale list, which is one line per stale file. Nothing
 dumps the ledger.
+
+**Parallel agents.** The decisions in force are this checkout's ledger plus the one committed on the
+default branch — locally and on `origin` — so a reversal committed on `main` reaches agents in other
+worktrees and on feature branches, and one pushed from another clone reaches this one. To see a push,
+the hooks fetch origin's default branch: in the background (at most every 30 s) on session start and
+edits, and synchronously (5 s cap) at `Stop` and in the pre-push guard. They never prompt for
+credentials and fail open; `TRAILSTONE_FETCH=0` turns fetching off. A linked worktree shares the main
+checkout's private ledger.
 
 `pre-push` runs `stale` and **exits 1** when a stale file is about to be pushed.
 
@@ -209,9 +219,14 @@ exactly once**, handing the agent the reversal, and allows the retry. That one-t
 only way Cursor lets a hook reach the agent before an edit — and it fires only on files that are
 already blocked at push, so it interrupts nothing that was not going to be stopped anyway.
 
+**Codex hooks — push, once trusted.** Codex runs the same hook shape from `~/.codex/hooks.json`;
+`install` writes it when `~/.codex` exists. Codex edits arrive as `apply_patch`, which trailstone reads
+for the paths it touches. Codex skips any new or changed hook until you trust it in `/hooks`, so
+nothing reaches a Codex agent until you do that once.
+
 **The honest limit.** Push — the warning arriving *unasked, before the edit* — works in Claude
-Code and Cursor. Codex, Windsurf and Claude Desktop are pull-only: the agent has to ask, and
-agents do not reliably remember to. A hook shim for one of those is the most valuable
+Code, Codex (after `/hooks`) and Cursor. Windsurf and Claude Desktop are pull-only: the agent has to
+ask, and agents do not reliably remember to. A hook shim for one of those is the most valuable
 contribution to this project.
 
 ## CLI
@@ -342,7 +357,7 @@ private repo. That is how a maintainer learns whether the fires were any good.
 
 - A GitHub App turning `stale` into check-run annotations on the exact lines.
 - `import`/export so a hosted, cross-repo team view can read the same yml.
-- Codex, Cursor, and other harnesses via their own hook shims over the same file.
+- Windsurf and other harnesses via their own hook shims over the same file.
 - A `git blame`-shaped `history <file>`: every decision that ever governed it.
 - Scope suggestions from the diff, so `decide` rarely needs `--scope` typed by hand.
 

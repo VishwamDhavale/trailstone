@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.2
+
+**New — Codex gets push.** Codex runs Claude-Code-shaped hooks from `~/.codex/hooks.json`; `install`
+now writes them there when you have Codex, `uninstall` removes them, `doctor` reports them. Codex edits
+arrive as `apply_patch` with the paths inside the patch, and the edit hook read only `file_path`, so it
+had never fired on a Codex edit — now it reads every path in the patch. Codex runs a new or changed
+hook only after you trust it: open `codex`, run `/hooks`, and trust the trailstone entries. `install`
+says so and never sets `bypass_hook_trust`. Measured with Codex agents in worktrees and a reversal
+mid-work: 1/9 reached before (the one ran the CLI itself), 6/6 after — the edit re-warning and the
+Stop re-check both seen working in Codex (threadchat `eval/reversal-midwork`).
+
+**New — a reversal pushed from another clone reaches agents here.** Separate clones (cloud agents, a
+teammate's machine) never saw a reversal someone pushed, because nothing fetched: 0/9 agents. The
+decisions in force now also include `origin`'s copy of the default branch, and the hooks keep it fresh
+— a background fetch at most every 30 s on session start and edits, a synchronous one (5 s cap) at
+`Stop` and in the pre-push guard: 9/9. **This is trailstone's first network call:** a `git fetch` of one
+ref from your own `origin`, with your git credentials, never prompting, failing open.
+`TRAILSTONE_FETCH=0` turns it off. `SECURITY.md` spells it out.
+
+Also verified with real agents: the private ledger in worktrees (15/15 reached, and no private text in
+any commit or worktree). README's hook table updated for 0.3.x behaviour.
+
 ## 0.3.1
 
 **Fixed — every hook fell silent in a repo reached through a symlink or a Windows short name.** git
