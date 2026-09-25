@@ -9,7 +9,7 @@ had never fired on a Codex edit — now it reads every path in the patch. Codex 
 hook only after you trust it: open `codex`, run `/hooks`, and trust the trailstone entries. `install`
 says so and never sets `bypass_hook_trust`. Measured with Codex agents in worktrees and a reversal
 mid-work: 1/9 reached before (the one ran the CLI itself), 6/6 after — the edit re-warning and the
-Stop re-check both seen working in Codex (threadchat `eval/reversal-midwork`).
+Stop re-check both seen working in Codex.
 
 **New — a reversal pushed from another clone reaches agents here.** Separate clones (cloud agents, a
 teammate's machine) never saw a reversal someone pushed, because nothing fetched: 0/9 agents. The
@@ -37,7 +37,7 @@ whenever the plain comparison says "outside"; a selfcheck assertion builds a sym
 **Fixed — agents in git worktrees and on feature branches never saw a reversal made on main.** Each
 checkout read its own branch's copy of the ledger, so a decision reversed and committed on the default
 branch reached no agent working in a worktree — and they kept being shown the reversed rule as current
-(0/9 in threadchat `eval/reversal-midwork`, worktree variant). The decisions in force are now this
+(0/9 measured, one worktree per agent). The decisions in force are now this
 checkout's ledger **plus** the ledger committed on the default branch (`origin/HEAD`, then
 `init.defaultBranch`, then `main`/`master`; local refs only — a separate clone still needs a fetch).
 Rows are append-only with unique ids, so the union is safe; rows that only the default branch has bind
@@ -50,7 +50,7 @@ rewrite could have copied private rows into the public file (no command reached 
 several agents in one repo, one agent (or a human) reversing a decision reached every agent that
 started a file afterwards — but an agent already mid-file kept the old rule, silently: the edit hook
 spoke once per file per session, and `stale` skips uncommitted files, then reads the later commit as
-"addressed" (0/3 such agents switched; threadchat `eval/reversal-midwork`, where updating CLAUDE.md
+"addressed" (0/3 such agents switched; in the same setup, updating CLAUDE.md
 reached 0/9 running agents). Two changes: the edit hook now re-fires whenever the set of decisions
 governing a file has changed since the agent last saw it, naming `was → now`; and at `Stop`, if a
 decision governing any file the agent edited this session moved after it last saw that file, the
@@ -61,7 +61,7 @@ agent is asked once — before the turn ends, while it can still fix it — to r
 the hook listed the decisions governing the file in ledger order and cut at 5. With a real-sized
 ledger that means the 5 *oldest* broad rules: on a docs page 10 decisions governed, and a newer
 `docs/` rule never reached the agent, which then broke it (2/6 followed vs 6/6 with the same rules in
-CLAUDE.md; threadchat `eval/write-time-30`). Governing decisions now rank the most specific scope
+CLAUDE.md). Governing decisions now rank the most specific scope
 first (exact file, then the deepest directory), then newest; the edit hook shows up to 10; and
 whatever the cap leaves out is named — `…and N more in force here — trailstone governing <file>` —
 instead of disappearing.
@@ -73,7 +73,7 @@ when a turn that wrote a file ends, the `Stop` hook asks the agent that did the 
 record any decision the turn committed to (`decide … --proposed`) or to say there was none. The detached `claude -p` haiku judge at `Stop` — which ran on every
 turn, on the user's own plan or key, whether or not `claude` auth billed it the way they expected
 — is now opt-in: `TRAILSTONE_CAPTURE=judge`. `TRAILSTONE_CAPTURE=0` still turns capture off.
-`doctor` reports the mode. Measured first (threadchat `eval/capture-inband`, 42 sessions): same
+`doctor` reports the mode. Measured first (42 headless sessions): same
 recall as the judge, no false positives on typo/validation turns (the judge had one), rows that name
 the rejected alternative, at about half the extra cost. Claude Code labels every Stop-hook block
 "Stop hook error occurred" and no output shape avoids it, so the block carries a `systemMessage`

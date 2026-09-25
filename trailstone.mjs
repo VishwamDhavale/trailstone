@@ -664,8 +664,8 @@ async function hook() {
 const JUDGE_MODEL = "claude-haiku-4-5-20251001";
 // Capture mode. DEFAULT is "inband": at Stop, the agent that is already running is asked once to
 // record its own decisions. "judge" opts into the detached second model (a headless `claude -p` per
-// turn, on the user's plan or key); "0" turns capture off. Measured 2026-09-23 (threadchat
-// eval/capture-inband, 42 sessions): same recall as the judge, fewer false positives, rows that name
+// turn, on the user's plan or key); "0" turns capture off. Measured 2026-09-23 (42
+// headless sessions): same recall as the judge, fewer false positives, rows that name
 // the rejected alternative, ~half the extra cost. An ask at the first EDIT instead avoids Claude
 // Code's Stop label but recorded unprompted decisions 3/6 vs 9/9 (12 more sessions) — so, Stop.
 const captureMode = () => ({ "0": "off", judge: "judge" })[process.env.TRAILSTONE_CAPTURE] || "inband";
