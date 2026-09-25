@@ -1934,7 +1934,7 @@ function selfcheck() {
       spawnSync("git", ["clone", "-q", "--depth", "1", "file://" + (d5.startsWith("/") ? "" : "/") + toPosix(d5), d6]);
       const s6 = st(d6);
       ok(s6.status === 1 && /SHALLOW/.test(s6.stderr) && !/clean/.test(s6.stdout), "a shallow clone does NOT report 'clean' — it refuses, exit 1");
-      writeFileSync(join(d6, LEDGER), readFileSync(join(d6, LEDGER), "utf8").replace(/  supersedes: d_o\n/, "  supersedes: d_o\n    stray: indented too far\n"));
+      writeFileSync(join(d6, LEDGER), readFileSync(join(d6, LEDGER), "utf8").replace(/  supersedes: d_o(\r?\n)/, (m, eol) => `${m}    stray: indented too far${eol}`)); // CRLF on Windows checkouts
       const s7 = st(d6);
       ok(s7.status === 1 && /could not read 1 ledger line/.test(s7.stderr) && /decisions\.yml:\d+/.test(s7.stderr), "an unreadable ledger line fails the guard and names file:line");
       rmSync(d5, { recursive: true, force: true }); rmSync(d6, { recursive: true, force: true });
