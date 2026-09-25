@@ -86,8 +86,8 @@ function ignorePrivate(r) {
   if (!privateInRepo()) return;
   const gi = join(r, ".gitignore");
   let cur = ""; try { cur = readFileSync(gi, "utf8"); } catch {}
-  if (cur.split("\n").some((l) => l.trim() === PRIVATE_REL)) return;
-  try { writeFileSync(gi, (cur && !cur.endsWith("\n") ? cur + "\n" : cur) + PRIVATE_REL + "\n"); } catch {}
+  if (cur.split("\n").some((l) => l.trim() === PRIVATE_REL)) return false;
+  try { writeFileSync(gi, (cur && !cur.endsWith("\n") ? cur + "\n" : cur) + PRIVATE_REL + "\n"); return true; } catch { return false; }
 }
 
 // The ledger is append-only, so two clones recording concurrently each add a row at EOF —
@@ -1690,9 +1690,17 @@ function install(f = {}) {
   const r = root();
   if (r) {
     const pp = join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push");
-    if (existsSync(pp)) console.log(`pre-push exists at ${pp} — add: node "${SELF_CMD}" stale`);
-    else { mkdirSync(dirname(pp), { recursive: true }); writeFileSync(pp, `#!/bin/sh\nexec "${NODE_ABS}" "${SELF_CMD}" stale\n`); chmodSync(pp, 0o755); console.log(`pre-push → ${pp}`); }
-    ignorePrivate(r); // reserve the private-ledger slot in .gitignore now, before any private decision exists
+    const ours = `#!/bin/sh\nexec "${NODE_ABS}" "${SELF_CMD}" stale\n`;
+    let cur = null; try { cur = readFileSync(pp, "utf8"); } catch {}
+    // A pre-push we wrote earlier is ours to refresh (node or the script may have moved since); anyone
+    // else's we never clobber. Telling the user to "add" a line the hook already runs read as broken.
+    if (cur === ours) console.log(`pre-push ok (${pp})`);
+    else if (cur == null || /^#!\/bin\/sh\nexec "[^"\n]+" "[^"\n]*trailstone[^"\n]*" stale\n?$/.test(cur)) {
+      mkdirSync(dirname(pp), { recursive: true }); writeFileSync(pp, ours); chmodSync(pp, 0o755); console.log(`pre-push → ${pp}${cur == null ? "" : " (updated)"}`);
+    } else if (/trailstone/.test(cur) && /\bstale\b/.test(cur)) console.log(`pre-push at ${pp} is yours and already runs trailstone stale — left alone`);
+    else console.log(`pre-push exists at ${pp} — add: "${NODE_ABS}" "${SELF_CMD}" stale`);
+    // reserve the private-ledger slot in .gitignore now, before any private decision exists
+    if (ignorePrivate(r)) console.log(`.gitignore += ${PRIVATE_REL} (the private ledger never gets committed)`);
     if (f["no-rules"]) console.log("skipped the agent rules file (--no-rules)");
     else writeRules(r);
     // Independent of --no-rules: that flag is about not writing prose into the repo. The Cursor
@@ -1711,7 +1719,7 @@ function install(f = {}) {
     console.log("Run `trailstone install` again from inside your repo to get both.");
   }
   console.log("Per repo: `init`, then commit .trailstone/decisions.yml. Repos without it stay silent.");
-  console.log("Claude Code gets the warning pushed before each edit (hooks). Other harnesses read AGENTS.md and must ask — commit it so they do.");
+  console.log("Claude Code, Codex (once trusted in /hooks) and Cursor get the warning pushed before each edit. Other agents read AGENTS.md and must ask — commit it so they do.");
 }
 
 // The one runnable check: a throwaway repo, a decision, a reversal, the three clears.
@@ -1986,6 +1994,14 @@ function selfcheck() {
     ok(cmds.every((c) => !c.includes("\\")), "hook commands contain no backslashes (git-bash on Windows)");
     const pp = readFileSync(join(dir, ".git", "hooks", "pre-push"), "utf8");
     ok(/^exec "[^"]+" "[^"]+" stale$/m.test(pp) && !pp.includes("\\"), "pre-push quotes both paths, absolute node, forward slashes");
+    ok(/\.gitignore \+= /.test(res.stdout), "install says it added the private ledger to .gitignore");
+    // Re-install (an upgrade): our own pre-push is recognised, not reported as someone else's hook.
+    writeFileSync(join(dir, ".git", "hooks", "pre-push"), `#!/bin/sh\nexec "/old/node" "/old/lib/trailstone/trailstone.mjs" stale\n`);
+    const again = spawnSync(process.execPath, [SELF, "install", "--no-rules"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } }).stdout;
+    ok(/pre-push → .*\(updated\)/.test(again) && !/— add:/.test(again) && !/\.gitignore \+=/.test(again) && readFileSync(join(dir, ".git", "hooks", "pre-push"), "utf8") === pp,
+      "re-install refreshes its own stale-pathed pre-push, says so, and does not re-announce .gitignore");
+    const third = spawnSync(process.execPath, [SELF, "install", "--no-rules"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } }).stdout;
+    ok(/pre-push ok/.test(third), "a third install finds the pre-push already current");
     // …and doctor must SEE what install wrote. A regex over the settings once missed the
     // quoted command and reported 0/4 while all four were live — a false "not watching"
     // in the one command whose entire job is answering "is it watching?".

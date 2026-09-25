@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Fixed — `install` on a repo it had already set up.** It reported its own pre-push hook as someone
+else's and told you to add the line that hook already runs; it now recognises the hook it wrote,
+refreshes the node and script paths in it (they change when you move between an npm install and a
+local checkout), and never touches a pre-push it did not write. It now says when it adds
+`.trailstone/private.yml` to `.gitignore`, and its closing line names every harness that gets the
+pre-edit warning (Claude Code, Codex once trusted, Cursor), not Claude Code alone.
+
 **Fixed — an agent editing a repo other than the one its session opened in got no warnings.** The
 edit hook and the `Stop` drift check took the repo from the session's working directory and dropped
 every path outside it as out of scope — silently, while `doctor` in the edited repo said "watching".
