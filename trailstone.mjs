@@ -74,7 +74,9 @@ const HEADER = `# Trailstone decision ledger. One entry per decision: what was d
 // staleness, the guard) with them, but the file itself never leaves the machine. Default is
 // in-repo and gitignored; TRAILSTONE_PRIVATE points it at an external store instead (outside
 // the working tree — cannot be committed at all, survives a repo delete, but is per-machine).
-const privatePath = (r) => process.env.TRAILSTONE_PRIVATE || join(r, PRIVATE_LEDGER);
+// In a linked worktree the in-repo private ledger is the MAIN checkout's: it is gitignored, so a new
+// worktree has none of its own, and every private decision was invisible to agents working there.
+const privatePath = (r) => process.env.TRAILSTONE_PRIVATE || join(mainRoot(r), PRIVATE_LEDGER);
 const privateInRepo = () => !process.env.TRAILSTONE_PRIVATE;
 const PRIVATE_HEADER = `# Trailstone PRIVATE ledger — gitignored, never pushed. Sensitive decisions
 # (secrets-adjacent, strategy, unannounced plans) live here; the tool merges them locally.
@@ -198,12 +200,48 @@ export function yamlParse(text) {
 }
 
 // ── ledger ────────────────────────────────────────────────────────────────────
+// Agents in parallel usually each get a worktree on a branch. Each read ITS branch's copy of the
+// ledger, so a reversal committed on main reached none of them — and they kept being shown the
+// reversed rule as current (reversal-midwork eval, worktree variant, 2026-09-25: 0/9).
+const _main = new Map(), _def = new Map();
+function mainRoot(r) { // the main checkout's root when r is a linked worktree, else r
+  if (!_main.has(r)) {
+    let m = r;
+    try {
+      const [gd, cd] = git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], r).split("\n");
+      if (gd !== cd && basename(cd) === ".git") m = dirname(cd);
+    } catch {}
+    _main.set(r, m);
+  }
+  return _main.get(r);
+}
+// The ledger as committed on the default branch, when HEAD is anywhere else (a feature branch, a
+// linked worktree, detached). Rows are append-only with unique ids — the file already merges with
+// merge=union — so the union is safe. Local ref only: a separate clone needs a fetch, which a hook
+// must never do.
+function defaultLedger(r) {
+  if (_def.has(r)) return _def.get(r);
+  const tryGit = (a) => { try { return git(a, r); } catch { return ""; } };
+  const cur = tryGit(["symbolic-ref", "-q", "--short", "HEAD"]);
+  const ref = [tryGit(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]).replace(/^origin\//, ""), tryGit(["config", "init.defaultBranch"]), "main", "master"]
+    .filter(Boolean).find((b) => tryGit(["rev-parse", "-q", "--verify", `refs/heads/${b}`]));
+  const text = ref && ref !== cur ? tryGit(["show", `refs/heads/${ref}:${LEDGER_REL}`]) : "";
+  const out = text ? { ref, rows: yamlParse(text) } : null;
+  _def.set(r, out); return out;
+}
 export function load(r) {
-  const pub = join(r, LEDGER), priv = privatePath(r);
+  const pub = join(r, LEDGER), priv = privatePath(r), dl = defaultLedger(r);
   const hasPub = existsSync(pub), hasPriv = existsSync(priv);
-  if (!hasPub && !hasPriv) return null;
+  if (!hasPub && !hasPriv && !dl) return null;
   const rows = hasPub ? yamlParse(readFileSync(pub, "utf8")) : [];
   rows.bad = (rows.bad || []).map((n) => `${LEDGER_REL}:${n}`); // "file:line", ready to print
+  // Rows only the default branch has are tagged `_from` (never serialized): they bind here, but
+  // a write never copies them into this branch's file.
+  if (dl) {
+    const have = new Set(rows.map((x) => x.id));
+    for (const row of dl.rows) if (!have.has(row.id)) rows.push({ ...row, _from: dl.ref });
+    rows.bad.push(...dl.rows.bad.map((n) => `${dl.ref}:${LEDGER_REL}:${n}`));
+  }
   // Private rows are tagged (not serialized — yamlEmit skips `_` keys) so writes route back to
   // the right file and the guard can tell public from private.
   if (hasPriv) {
@@ -223,7 +261,7 @@ function rewrite(r, rows) { // keep the leading comment header a rewrite would o
   const p = join(r, LEDGER);
   const lines = existsSync(p) ? readFileSync(p, "utf8").split("\n") : [];
   let n = 0; while (n < lines.length && lines[n].trimStart().startsWith("#")) n++;
-  writeFileSync(p, (n ? lines.slice(0, n).join("\n") + "\n" : "") + rows.map(yamlEmit).join(""));
+  writeFileSync(p, (n ? lines.slice(0, n).join("\n") + "\n" : "") + rows.filter((x) => !x._from && !x._private).map(yamlEmit).join("")); // public rows of THIS branch only
 }
 const newId = (p) => `${p}_${randomBytes(4).toString("hex")}`;
 
@@ -855,6 +893,7 @@ function need(r) { const rows = load(r); if (!rows) { console.error(`no ${LEDGER
 function setStatus(r, rows, id, status) {
   const row = rows.find((x) => x.id === id && x.status === "proposed");
   if (!row) { console.error(`no proposed decision ${id}`); process.exit(2); }
+  if (row._from) { console.error(`${id} is in the ledger on ${row._from}, not this branch's — ${status || "ratify"} it there (git checkout ${row._from}).`); process.exit(2); }
   if (status) row.status = status; else delete row.status;
   row.by = `${row.by.replace(/ \(captured\)$/, "")}, ${status || "ratified"} by ${who(r)}`;
   // Splice ONLY this entry's lines back into the raw file. Re-emitting every row (what
@@ -1701,6 +1740,26 @@ function selfcheck() {
     ok(s1.decision === "block" && /src\/b\.ts/.test(s1.reason) && !/src\/a\.ts/.test(s1.reason) && /not an error/.test(s1.systemMessage || ""), "Stop asks about the file whose rules moved since the agent last saw them (b), not the one it was already re-shown (a)");
     ok(!stop().decision && !stop({ stop_hook_active: true }).decision, "Stop asks about a drift once, and never on the continuation");
     rmSync(d5, { recursive: true, force: true });
+  }
+  { // Worktrees (reversal-midwork, worktree variant): a reversal committed on the default branch binds in a
+    // linked worktree on another branch, and the main checkout's private ledger is the worktree's too.
+    const d6 = join(tmpdir(), `trailstone-wt-${Date.now()}`), w6 = `${d6}-w`; mkdirSync(join(d6, "src"), { recursive: true });
+    const g6 = (cwd, ...a) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd, encoding: "utf8" });
+    g6(d6, "init", "-q", "-b", "main"); writeFileSync(join(d6, "src", "a.ts"), "a");
+    mkdirSync(join(d6, ".trailstone")); writeFileSync(join(d6, LEDGER), HEADER);
+    append(d6, { id: "d_w1", at: "2025-01-01T00:00:00Z", by: "t", decision: "timestamps are ISO strings", scope: ["src/"] });
+    g6(d6, "add", "-A"); g6(d6, "commit", "-qm", "x"); g6(d6, "worktree", "add", "-q", w6, "-b", "feat");
+    ok(governing(load(d6), "src/a.ts").length === 1 && load(d6).every((x) => !x._from), "on the default branch the ledger is read once, not unioned with itself");
+    append(d6, { id: "d_w2", at: "2025-02-01T00:00:00Z", by: "t", decision: "timestamps are epoch ms", scope: ["src/"], supersedes: "d_w1" });
+    g6(d6, "commit", "-qm", "rev", "--", LEDGER_REL);
+    append(d6, { id: "d_wp", at: "2025-02-02T00:00:00Z", by: "t", decision: "secret vendor is X", scope: ["src/"] }, true);
+    _main.clear(); _def.clear();
+    const wr = load(w6), gw = governing(wr, "src/a.ts").map((d) => d.id);
+    ok(gw.includes("d_w2") && !gw.includes("d_w1") && wr.find((x) => x.id === "d_w2")?._from === "main", "a reversal committed on main is in force in a worktree on another branch");
+    ok(gw.includes("d_wp") && wr.find((x) => x.id === "d_wp")?._private, "the main checkout's private ledger is visible in its worktrees");
+    rewrite(w6, wr);
+    ok(!readFileSync(join(w6, LEDGER), "utf8").includes("d_w2") && !readFileSync(join(w6, LEDGER), "utf8").includes("d_wp"), "a rewrite in the worktree never copies main's (or private) rows into the branch's file");
+    g6(d6, "worktree", "remove", "--force", w6); rmSync(d6, { recursive: true, force: true }); rmSync(w6, { recursive: true, force: true });
   }
   { // In-band capture asks the running agent ONCE, and only after a turn that wrote a file.
     const tp = join(dir, "inband-transcript.jsonl");

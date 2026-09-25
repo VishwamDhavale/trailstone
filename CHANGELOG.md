@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**Fixed — agents in git worktrees and on feature branches never saw a reversal made on main.** Each
+checkout read its own branch's copy of the ledger, so a decision reversed and committed on the default
+branch reached no agent working in a worktree — and they kept being shown the reversed rule as current
+(0/9 in threadchat `eval/reversal-midwork`, worktree variant). The decisions in force are now this
+checkout's ledger **plus** the ledger committed on the default branch (`origin/HEAD`, then
+`init.defaultBranch`, then `main`/`master`; local refs only — a separate clone still needs a fetch).
+Rows are append-only with unique ids, so the union is safe; rows that only the default branch has bind
+here but are never written into this branch's file, and `ratify`/`reject` of one points you to that
+branch. **The private ledger now follows the main checkout:** it is gitignored, so a new worktree had
+none, and every private decision was invisible to agents working there. Also fixed: an internal ledger
+rewrite could have copied private rows into the public file (no command reached it; now excluded).
+
 **Fixed — a decision reversed while an agent works now reaches that agent's in-progress files.** With
 several agents in one repo, one agent (or a human) reversing a decision reached every agent that
 started a file afterwards — but an agent already mid-file kept the old rule, silently: the edit hook
