@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed — a ledger without a final newline swallowed the next decision.** `decide`, `reverse` and
+`validate` append to `.trailstone/decisions.yml`; a file saved without a trailing newline (a hand edit,
+a migration) got the new row glued onto its last line, so the row merged into the previous entry and
+inherited its scope — a reversal then flagged files it never governed. Append now starts on a fresh line.
+
 ## 0.3.2
 
 **New — Codex gets push.** Codex runs Claude-Code-shaped hooks from `~/.codex/hooks.json`; `install`

@@ -301,7 +301,10 @@ export function load(r) {
 function append(r, row, priv = false) {
   const p = priv ? privatePath(r) : join(r, LEDGER);
   if (priv && !existsSync(p)) { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, PRIVATE_HEADER); ignorePrivate(r); }
-  appendFileSync(p, yamlEmit(row)); return row;
+  // A ledger saved without a trailing newline (hand edit, migration) would glue the new row onto the
+  // last line — the row silently merges into the previous entry and inherits its scope.
+  const tail = existsSync(p) ? readFileSync(p, "utf8").slice(-1) : "\n";
+  appendFileSync(p, (tail && tail !== "\n" ? "\n" : "") + yamlEmit(row)); return row;
 }
 function rewrite(r, rows) { // keep the leading comment header a rewrite would otherwise eat
   const p = join(r, LEDGER);
@@ -1716,7 +1719,9 @@ function selfcheck() {
   ok(rel(dir, join(dir, "src", "auth", "jwt.ts")) === "src/auth/jwt.ts", `repo-relative paths are forward-slashed (got: ${rel(dir, join(dir, "src", "auth", "jwt.ts"))})`);
   ok(governing(load(dir), rel(dir, join(dir, "src", "auth", "jwt.ts"))).length === 1, "an ABSOLUTE path resolves to a governed file (the hook path)");
   ok(stale(dir).length === 0, "no reversal → nothing stale");
+  writeFileSync(join(dir, LEDGER), readFileSync(join(dir, LEDGER), "utf8").replace(/\n+$/, "")); // saved without a final newline
   append(dir, { id: "d_new", at: "2021-01-01T00:00:00Z", by: "t", decision: "sessions use cookies, not JWT", scope: [], supersedes: old.id });
+  ok(load(dir).map((x) => x.id).join() === "d_old,d_new" && !load(dir).bad.length, "append after a ledger with no final newline starts a new row");
   let st = stale(dir);
   ok(st.length === 1 && st[0].file === "src/auth/jwt.ts" && st[0].was.includes("JWT") && st[0].now.includes("cookies"), "reversal flags exactly the governed file");
   ok(inForce(load(dir)).length === 1 && inForce(load(dir))[0].id === "d_new", "supersession removes the old one from force");
