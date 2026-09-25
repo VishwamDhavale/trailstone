@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Fixed — every hook fell silent in a repo reached through a symlink or a Windows short name.** git
+reports the repository root with symlinks and short names resolved (`/private/var/…` on macOS,
+`C:\Users\runneradmin\…` on Windows); a harness passes file paths as typed (`/var/…`, `RUNNER~1`). The
+path comparison read every such file as outside the repo, so the edit hook, the Stop checks and capture
+said nothing — no error, no warning. This is what the macOS and Windows CI jobs had been failing on
+since 0.2.5, and it is the reason 0.3.0's CI is red. Paths are now compared by their real location
+whenever the plain comparison says "outside"; a selfcheck assertion builds a symlinked repo to prove it.
+
 ## 0.3.0
 
 **Fixed — agents in git worktrees and on feature branches never saw a reversal made on main.** Each

@@ -40,7 +40,7 @@
 // single-quoted scalars are NOT understood — a hand-edit using them is skipped, not
 // read. Upgrade path: `yaml` from npm if the ledger ever needs real YAML.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, chmodSync, rmSync, realpathSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, chmodSync, rmSync, realpathSync, readdirSync, symlinkSync } from "node:fs";
 import { join, dirname, relative, isAbsolute, matchesGlob, basename } from "node:path";
 // path.matchesGlob landed in node 20.17 / 22.5. Below that it is undefined, the try/catch
 // in matches() swallows the TypeError, and every glob scope silently governs NOTHING —
@@ -111,6 +111,24 @@ const git = (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8", ti
 // node's relative() returns backslashes on Windows, so without this a scope of "src/auth/"
 // silently matched nothing there: the hook surfaced no decisions and said nothing about it.
 const toPosix = (p) => p.replace(/\\/g, "/");
+// A path as the harness spelled it, relative to the root git reports. git resolves symlinks and
+// short names (/private/var on macOS, C:\Users\runneradmin on Windows) while a harness passes the
+// path as typed (/var/…, RUNNER~1), so a plain relative() read EVERY file as outside the repo and
+// every hook fell silent — the macOS + Windows selfcheck failures in CI since 0.2.5. Real paths are
+// compared only when the plain answer escapes the repo; the common case stays one string op.
+const realOf = (p) => { // realpath of p, or of its nearest existing ancestor + the rest (a Write target may not exist yet)
+  const tail = [];
+  for (let d = p, i = 0; i < 256; i++) {
+    try { return join(realpathSync.native(d), ...tail); } catch {}
+    const up = dirname(d); if (up === d) break; tail.unshift(basename(d)); d = up;
+  }
+  return p;
+};
+export function repoRel(r, p) {
+  if (!p || !isAbsolute(p)) return p && toPosix(p);
+  const a = relative(r, p);
+  return toPosix(a.startsWith("..") || isAbsolute(a) ? relative(realOf(r), realOf(p)) : a);
+}
 export function root(cwd = process.cwd()) {
   try { return git(["rev-parse", "--show-toplevel"], cwd); } catch { return null; }
 }
@@ -497,7 +515,7 @@ async function hook() {
   if (!r) process.exit(0); // not a git repo → nothing to say, and never a blocked prompt
   const rows = load(r);
   if (!rows) process.exit(0); // repo not opted in (no .trailstone/decisions.yml) → silent
-  const rel = (p) => toPosix(isAbsolute(p) ? relative(r, p) : p);
+  const rel = (p) => repoRel(r, p);
 
   if (event === "SessionStart") {
     const st = stale(r, rows), n = inForce(rows).length, p = proposed(rows).length;
@@ -770,7 +788,7 @@ export function validateScope(claimed, touched, text) {
 async function capture(r, rows, transcriptPath) {
   const turn = lastTurn(transcriptPath);
   if (!turn) return;
-  const touched = (turn.files || []).map((f) => toPosix(isAbsolute(f) ? relative(r, f) : f)).filter((f) => f && !f.startsWith(".."));
+  const touched = (turn.files || []).map((f) => repoRel(r, f)).filter((f) => f && !f.startsWith(".."));
   const gov = [...new Map(touched.flatMap((f) => governing(rows, f)).map((d) => [d.id, d])).values()];
   const { decisions, contradicted, failed, error, cost } = judge(turn, gov, touched);
   if (failed) return logCapture("FAIL", `${basename(r)} ${error}`);
@@ -797,7 +815,7 @@ const fileProblem = (r, f) => {
   if (!f) return "no file given — pass a path relative to the repo root";
   // Outside the repo entirely (/etc/passwd, ../sibling) is not "ungoverned": this ledger
   // says nothing about it either way, and saying "ungoverned" reads as "clear to proceed".
-  const rp = toPosix(relative(r, isAbsolute(f) ? f : join(r, f)));
+  const rp = isAbsolute(f) ? repoRel(r, f) : toPosix(relative(r, join(r, f)));
   if (rp === ".." || rp.startsWith("../") || isAbsolute(rp)) return `that path is outside this repo (${r}) — this ledger governs nothing there`;
   try { if (existsSync(isAbsolute(f) ? f : join(r, f))) return null; } catch { return null; }
   try { return git(["ls-files", "--error-unmatch", "--", rp], r) ? null : `no such file in this repo: ${f} — check the path`; }
@@ -852,7 +870,7 @@ function cursorHook(pre) {
       // and the name has differed across versions — accept every spelling seen rather than guess one.
       const fp = ti.file_path || ti.filePath || ti.target_file || ti.path || ti.file;
       if (!fp || !/write|edit|delete/i.test(String(input.tool_name || ""))) allow();
-      const f = toPosix(isAbsolute(fp) ? relative(r, fp) : fp);
+      const f = repoRel(r, fp);
       if (!f || f.startsWith("..")) allow();
       const st = stale(r, rows).filter((x) => x.file === f);
       if (!st.length) allow();
@@ -1086,7 +1104,7 @@ async function main(argv) {
     default: console.log(readFileSync(SELF, "utf8").split("\n").slice(1, 30).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + `\n\ntrailstone ${VERSION} · node ${process.version}`);
   }
 }
-const rel = (r, p) => toPosix(isAbsolute(p) ? relative(r, p) : p);
+const rel = repoRel;
 
 // The guard, as a function so the selfcheck can fire the logging path without a subprocess.
 function guard(r) { const st = stale(r, load(r) || []); logFires(r, st, "guard"); return st; }
@@ -1740,6 +1758,13 @@ function selfcheck() {
     ok(s1.decision === "block" && /src\/b\.ts/.test(s1.reason) && !/src\/a\.ts/.test(s1.reason) && /not an error/.test(s1.systemMessage || ""), "Stop asks about the file whose rules moved since the agent last saw them (b), not the one it was already re-shown (a)");
     ok(!stop().decision && !stop({ stop_hook_active: true }).decision, "Stop asks about a drift once, and never on the continuation");
     rmSync(d5, { recursive: true, force: true });
+  }
+  { // A repo reached through a symlink (macOS /var → /private/var): git reports the real root, the harness
+    // the typed path. Every hook fell silent there (CI macOS/Windows since 0.2.5). Skipped where symlinks need privileges.
+    const real7 = join(tmpdir(), `trailstone-real-${Date.now()}`), link7 = `${real7}-link`; mkdirSync(join(real7, "src"), { recursive: true });
+    let linked = false; try { symlinkSync(real7, link7, "dir"); linked = true; } catch {}
+    if (linked) ok(repoRel(realpathSync.native(real7), join(link7, "src", "new.ts")) === "src/new.ts" && repoRel(real7, "/elsewhere/x.ts").startsWith(".."), "paths through a symlink resolve inside the repo (even a file not written yet); outside stays outside");
+    rmSync(link7, { force: true }); rmSync(real7, { recursive: true, force: true });
   }
   { // Worktrees (reversal-midwork, worktree variant): a reversal committed on the default branch binds in a
     // linked worktree on another branch, and the main checkout's private ledger is the worktree's too.
