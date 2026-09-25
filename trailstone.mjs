@@ -40,7 +40,7 @@
 // single-quoted scalars are NOT understood — a hand-edit using them is skipped, not
 // read. Upgrade path: `yaml` from npm if the ledger ever needs real YAML.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, chmodSync, rmSync, realpathSync, readdirSync, symlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, chmodSync, rmSync, realpathSync, readdirSync, symlinkSync, statSync } from "node:fs";
 import { join, dirname, relative, isAbsolute, matchesGlob, basename } from "node:path";
 // path.matchesGlob landed in node 20.17 / 22.5. Below that it is undefined, the try/catch
 // in matches() swallows the TypeError, and every glob scope silently governs NOTHING —
@@ -233,19 +233,47 @@ function mainRoot(r) { // the main checkout's root when r is a linked worktree, 
   }
   return _main.get(r);
 }
-// The ledger as committed on the default branch, when HEAD is anywhere else (a feature branch, a
-// linked worktree, detached). Rows are append-only with unique ids — the file already merges with
-// merge=union — so the union is safe. Local ref only: a separate clone needs a fetch, which a hook
-// must never do.
+// The ledger as committed on the default branch — the local branch when HEAD is anywhere else (a
+// feature branch, a linked worktree, detached), and origin's copy of it (another clone's reversal,
+// once fetched). Rows are append-only with unique ids — the file already merges with merge=union —
+// so the union is safe.
+const tryGitIn = (r) => (a) => { try { return git(a, r); } catch { return ""; } };
+const defaultBranch = (r) => { const t = tryGitIn(r);
+  return [t(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]).replace(/^origin\//, ""), t(["config", "init.defaultBranch"]), "main", "master"]
+    .filter(Boolean).find((b) => t(["rev-parse", "-q", "--verify", `refs/heads/${b}`]) || t(["rev-parse", "-q", "--verify", `refs/remotes/origin/${b}`])); };
 function defaultLedger(r) {
   if (_def.has(r)) return _def.get(r);
-  const tryGit = (a) => { try { return git(a, r); } catch { return ""; } };
-  const cur = tryGit(["symbolic-ref", "-q", "--short", "HEAD"]);
-  const ref = [tryGit(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]).replace(/^origin\//, ""), tryGit(["config", "init.defaultBranch"]), "main", "master"]
-    .filter(Boolean).find((b) => tryGit(["rev-parse", "-q", "--verify", `refs/heads/${b}`]));
-  const text = ref && ref !== cur ? tryGit(["show", `refs/heads/${ref}:${LEDGER_REL}`]) : "";
-  const out = text ? { ref, rows: yamlParse(text) } : null;
+  const t = tryGitIn(r), cur = t(["symbolic-ref", "-q", "--short", "HEAD"]), b = defaultBranch(r);
+  const rows = [], have = new Set(); rows.bad = []; let label = null;
+  for (const ref of b ? [b !== cur && `refs/heads/${b}`, `refs/remotes/origin/${b}`].filter(Boolean) : []) {
+    const text = t(["show", `${ref}:${LEDGER_REL}`]); if (!text) continue;
+    const name = ref.replace(/^refs\/(heads|remotes)\//, ""), p = yamlParse(text); label ??= name;
+    for (const row of p) if (!have.has(row.id)) { have.add(row.id); rows.push(row); }
+    rows.bad.push(...p.bad.map((n) => `${name}:${LEDGER_REL}:${n}`));
+  }
+  const out = rows.length ? { ref: label, rows } : null;
   _def.set(r, out); return out;
+}
+// Separate clones (cloud agents, a teammate's machine): a reversal pushed to origin reaches a clone
+// only through a fetch, and nothing fetched (reversal-midwork, clone variant). Refresh origin's copy of
+// the default branch — synchronously where the answer is needed now (Stop's drift check, the guard),
+// in the background at most every 30 s otherwise, so an edit never waits on the network. Never prompts
+// for credentials, never waits more than 5 s, fails open. TRAILSTONE_FETCH=0 turns it off.
+function refreshDefault(r, wait) {
+  if (process.env.TRAILSTONE_FETCH === "0") return;
+  try {
+    const t = tryGitIn(r);
+    if (!t(["remote"]).split("\n").includes("origin")) return;
+    const b = defaultBranch(r); if (!b) return;
+    const stamp = join(git(["rev-parse", "--path-format=absolute", "--git-common-dir"], r), "trailstone-fetch");
+    if (!wait) { try { if (Date.now() - statSync(stamp).mtimeMs < 30000) return; } catch {} }
+    try { writeFileSync(stamp, ""); } catch {}
+    const args = ["-c", "credential.interactive=never", "fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${b}:refs/remotes/origin/${b}`];
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND || "ssh -o BatchMode=yes" };
+    if (wait) spawnSync("git", args, { cwd: r, env, timeout: 5000, stdio: "ignore" });
+    else spawn("git", args, { cwd: r, env, detached: true, stdio: "ignore" }).unref();
+    _def.delete(r);
+  } catch {}
 }
 export function load(r) {
   const pub = join(r, LEDGER), priv = privatePath(r), dl = defaultLedger(r);
@@ -258,7 +286,7 @@ export function load(r) {
   if (dl) {
     const have = new Set(rows.map((x) => x.id));
     for (const row of dl.rows) if (!have.has(row.id)) rows.push({ ...row, _from: dl.ref });
-    rows.bad.push(...dl.rows.bad.map((n) => `${dl.ref}:${LEDGER_REL}:${n}`));
+    rows.bad.push(...dl.rows.bad);
   }
   // Private rows are tagged (not serialized — yamlEmit skips `_` keys) so writes route back to
   // the right file and the guard can tell public from private.
@@ -525,6 +553,9 @@ async function hook() {
   if (CURSOR_EVENTS.has(event)) return cursorHook(input);
   const r = root(input.cwd || process.cwd());
   if (!r) process.exit(0); // not a git repo → nothing to say, and never a blocked prompt
+  // A reversal pushed from another clone: fetch it before reading the ledger (see refreshDefault).
+  if (event === "Stop" && !input.stop_hook_active) refreshDefault(r, true);
+  else if (event === "SessionStart" || event === "PreToolUse") refreshDefault(r, false);
   const rows = load(r);
   if (!rows) process.exit(0); // repo not opted in (no .trailstone/decisions.yml) → silent
   const rel = (p) => repoRel(r, p);
@@ -1078,6 +1109,7 @@ async function main(argv) {
           process.exit(1);
         } catch {} // not tracked → good, the normal case
       }
+      refreshDefault(r, true); // the guard is where a reversal someone else pushed must not be missed
       const st = guard(r);
       // "clean" must mean "I checked and nothing is stale", never "I had nothing to check".
       // With no ledger this printed "clean" and exited 0 — so a CI gate (`trailstone stale`) on a
@@ -1928,6 +1960,26 @@ function selfcheck() {
     spawnSync(process.execPath, [SELF, "uninstall"], { cwd: dir, encoding: "utf8", env });
     ok(countHooks(join(home, ".codex", "hooks.json")) === 0 && readFileSync(join(home, ".codex", "hooks.json"), "utf8").includes("other-tool stop"), "uninstall strips only our Codex hooks");
     rmSync(home, { recursive: true, force: true });
+  }
+  { // Separate clones: a reversal pushed to origin reaches another clone's Stop check through the fetch at Stop.
+    const base = join(tmpdir(), `trailstone-clones-${Date.now()}`), O = join(base, "origin.git"), A = join(base, "a"), B = join(base, "b");
+    mkdirSync(base, { recursive: true });
+    const g9 = (cwd, ...a) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd, encoding: "utf8" });
+    g9(base, "init", "-q", "--bare", "-b", "main", O); g9(base, "clone", "-q", O, B);
+    g9(B, "checkout", "-q", "-b", "main"); mkdirSync(join(B, "src")); writeFileSync(join(B, "src", "a.ts"), "a");
+    mkdirSync(join(B, ".trailstone")); writeFileSync(join(B, LEDGER), HEADER);
+    append(B, { id: "d_k1", at: "2025-01-01T00:00:00Z", by: "t", decision: "timestamps are ISO strings", scope: ["src/"] });
+    g9(B, "add", "-A"); g9(B, "commit", "-qm", "x"); g9(B, "push", "-q", "origin", "main");
+    g9(base, "clone", "-q", O, A); g9(A, "checkout", "-q", "-b", "feat");
+    const run9 = (input, extra = {}) => { const o = spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env: { ...process.env, TRAILSTONE_CAPTURE: "0", TRAILSTONE_FIRES_LOG: join(base, "f.log"), TRAILSTONE_SHOWN_LOG: join(base, "s.log"), ...extra }, input: JSON.stringify({ cwd: A, ...input }) }).stdout; try { return JSON.parse(o); } catch { return {}; } };
+    const sA = `clone-${Date.now()}`, sOff = `${sA}-off`;
+    for (const sid of [sA, sOff]) run9({ hook_event_name: "PreToolUse", session_id: sid, tool_name: "Edit", tool_input: { file_path: join(A, "src", "a.ts") } });
+    append(B, { id: "d_k2", at: "2025-02-01T00:00:00Z", by: "t", decision: "timestamps are epoch ms", scope: ["src/"], supersedes: "d_k1" });
+    g9(B, "commit", "-qm", "rev", "--", LEDGER_REL); g9(B, "push", "-q", "origin", "main");
+    ok(!run9({ hook_event_name: "Stop", session_id: sOff }, { TRAILSTONE_FETCH: "0" }).decision, "with TRAILSTONE_FETCH=0 a clone never fetches, so a pushed reversal stays unseen");
+    const s9 = run9({ hook_event_name: "Stop", session_id: sA });
+    ok(s9.decision === "block" && /epoch ms/.test(s9.reason || ""), "a reversal pushed from another clone reaches this clone's Stop check (fetched at Stop)");
+    rmSync(base, { recursive: true, force: true });
   }
   { // Codex edits arrive as apply_patch: tool_input.command is the patch, one call may touch several files.
     const d8 = join(tmpdir(), `trailstone-codex-${Date.now()}`); mkdirSync(join(d8, "src"), { recursive: true });
