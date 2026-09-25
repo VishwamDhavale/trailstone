@@ -525,7 +525,7 @@ function editPaths(input) {
 const govSig = (rows, f) => governing(rows, f).map((d) => d.id).sort().join(",");
 // "was → now" for every decision in the old set that is no longer in force, following the
 // supersession chain to whatever replaced it; plus any decision that newly governs the file.
-function renderDrift(rows, f, was) {
+function renderDrift(rows, f, was, label = f) {
   const byId = new Map(rows.map((x) => [x.id, x])), now = governing(rows, f), nowIds = new Set(now.map((d) => d.id)), prev = new Set(was.split(",").filter(Boolean));
   const out = [], replaced = new Set();
   for (const id of prev) {
@@ -533,9 +533,9 @@ function renderDrift(rows, f, was) {
     let cur = id, next;
     for (let i = 0; i < 50 && (next = rows.find((x) => x.supersedes === cur && (x.kind ?? "decision") === "decision" && !x.status)); i++) cur = next.id;
     if (cur !== id && nowIds.has(cur)) replaced.add(cur);
-    out.push(`  - ${f}: was "${byId.get(id)?.decision ?? id}" → now "${cur !== id && nowIds.has(cur) ? byId.get(cur).decision : "(no longer in force)"}"`);
+    out.push(`  - ${label}: was "${byId.get(id)?.decision ?? id}" → now "${cur !== id && nowIds.has(cur) ? byId.get(cur).decision : "(no longer in force)"}"`);
   }
-  for (const d of now) if (!prev.has(d.id) && !replaced.has(d.id)) out.push(`  - ${f}: new "${d.decision}"`);
+  for (const d of now) if (!prev.has(d.id) && !replaced.has(d.id)) out.push(`  - ${label}: new "${d.decision}"`);
   return out;
 }
 const DRIFT_HEAD = "⚠️ CHANGED WHILE YOU WORKED — a decision governing a file you already edited this session is no longer the one you were shown. What you wrote there followed the old rule:\n";
@@ -554,11 +554,14 @@ async function hook() {
   // the same entry gets called by both harnesses, and answering in Claude's dialect there means
   // exiting 0 silently forever. Detect the dialect from the event name and answer in it.
   if (CURSOR_EVENTS.has(event)) return cursorHook(input);
+  // Edits and the drift check follow the FILE's repo, not the session's: a session opened in one
+  // repo (or above any repo) that edits another was told nothing (bwmi dogfood, 2026-09-26).
+  if (event === "PreToolUse") return editHook(input);
+  if (event === "Stop" && !input.stop_hook_active && input.session_id) driftCheck(input); // exits when it blocks
   const r = root(input.cwd || process.cwd());
   if (!r) process.exit(0); // not a git repo → nothing to say, and never a blocked prompt
   // A reversal pushed from another clone: fetch it before reading the ledger (see refreshDefault).
-  if (event === "Stop" && !input.stop_hook_active) refreshDefault(r, true);
-  else if (event === "SessionStart" || event === "PreToolUse") refreshDefault(r, false);
+  if (event === "SessionStart") refreshDefault(r, false);
   const rows = load(r);
   if (!rows) process.exit(0); // repo not opted in (no .trailstone/decisions.yml) → silent
   const rel = (p) => repoRel(r, p);
@@ -583,52 +586,6 @@ async function hook() {
     logShown(r, "prompt", rv.decisions.length);
     return emit(event, "# Trailstone — relevant to this request\n" + [g, renderStale(st), renderRelevant(rv, "Relevant decisions in force")].filter(Boolean).join("\n\n"));
   }
-  if (event === "PreToolUse") {
-    const files = [...new Set(editPaths(input).map(rel))].filter((f) => f && !f.startsWith(".."));
-    if (!files.length) process.exit(0);
-    const sf = sessFile(input.session_id, "edit"), touched = readJson(sf, []), fresh = files.filter((f) => !touched.includes(f));
-    if (fresh.length) try { writeFileSync(sf, JSON.stringify([...touched, ...fresh].slice(-50))); } catch {}
-    // Once per (session, file, rule set) — not once per (session, file): a decision reversed while
-    // this agent works must reach its NEXT edit of a file it already touched. Once-per-file left an
-    // agent mid-file on the old rule, unflagged (reversal-midwork eval, 2026-09-25: 0/3).
-    const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), parts = [];
-    const st = stale(r, rows);
-    for (const f of files) {
-      const key = `${r}\u0000${f}`, sig = govSig(rows, f);
-      if (seen[key] === sig) continue;
-      const drift = key in seen ? renderDrift(rows, f, seen[key]) : [];
-      delete seen[key]; seen[key] = sig; // re-insert: the most recent entries survive the cap below
-      // The edit is the moment a rule is needed, and a one-line rule is cheap: a wider cap than the
-      // prompt surface, whose matches are lexical guesses.
-      const rv = relevant(rows, { files: [f], cap: 10 }), sf1 = st.filter((x) => x.file === f);
-      if (!drift.length && !rv.decisions.length && !rv.proposed.length && !sf1.length) continue;
-      logFires(r, sf1, "edit");
-      logShown(r, "edit", rv.decisions.length);
-      parts.push(`# Trailstone — governing ${f}\n` + [drift.length ? DRIFT_HEAD + drift.join("\n") : "", renderStale(sf1), renderRelevant(rv, "This file is governed by", `governing ${f}`)].filter(Boolean).join("\n\n"));
-    }
-    try { writeFileSync(kf, JSON.stringify(Object.fromEntries(Object.entries(seen).slice(-50)))); } catch {}
-    if (!parts.length) process.exit(0);
-    return emit(event, parts.join("\n\n"));
-  }
-  // A decision governing a file this agent edited was reversed AFTER it last saw that file's rules:
-  // its work there followed the old rule, it is uncommitted (so `stale` skips it) and will be
-  // committed after the reversal (so `stale` reads it as addressed). The agent that wrote it is
-  // still here — ask it before the turn ends. Once: the continuation carries stop_hook_active.
-  if (event === "Stop" && !input.stop_hook_active && input.session_id) {
-    const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), mine = `${r}\u0000`;
-    const moved = Object.entries(seen).filter(([k, s]) => k.startsWith(mine) && govSig(rows, k.slice(mine.length)) !== s);
-    if (moved.length) {
-      const lines = moved.flatMap(([k, s]) => renderDrift(rows, k.slice(mine.length), s));
-      try { writeFileSync(kf, JSON.stringify({ ...seen, ...Object.fromEntries(moved.map(([k]) => [k, govSig(rows, k.slice(mine.length))])) })); } catch {}
-      let also = "";
-      if (captureMode() === "inband" && input.transcript_path) try {
-        const t = (lastTurn(input.transcript_path)?.files || []).map(rel).filter((f) => f && !f.startsWith(".."));
-        if (t.length) also = "\n\nThen, separately: " + inbandAsk(t, [...new Map(t.flatMap((f) => governing(rows, f)).map((d) => [d.id, d])).values()]);
-      } catch {}
-      process.stdout.write(JSON.stringify({ decision: "block", reason: DRIFT_HEAD + lines.join("\n") + "\nRe-check each file against the new decision and fix what still follows the old one, then say what you changed." + also, systemMessage: DRIFT_NOTE }));
-      process.exit(0);
-    }
-  }
   if (event === "Stop" && captureMode() === "inband") {
     // Capture by the agent that is ALREADY running (its context, its model, its billing), instead
     // of a second headless model. Claude Code's Stop hook may return decision:"block" — the agent
@@ -636,6 +593,8 @@ async function hook() {
     // this asks exactly once per turn. Claude Code labels EVERY Stop block "Stop hook error
     // occurred" (no output shape avoids it), so systemMessage tells the user what it really is.
     // ponytail: only turns that edited a file are asked; a talk-only decision turn is missed.
+    // ponytail: only files in the session's repo are asked about — `decide` writes to the cwd's
+    // ledger, so asking about another repo's files would record into the wrong one.
     if (input.stop_hook_active || !input.transcript_path) process.exit(0);
     let turn = null; try { turn = lastTurn(input.transcript_path); } catch {}
     const touched = (turn?.files || []).map(rel).filter((f) => f && !f.startsWith(".."));
@@ -655,6 +614,76 @@ async function hook() {
     await capture(r, rows, input.transcript_path);
     process.exit(0);
   }
+  process.exit(0);
+}
+
+// The repo a file lives in: nearest existing directory up (a Write may be creating one).
+function repoOfFile(p) {
+  for (let d = dirname(p); ; d = dirname(d)) { if (existsSync(d)) return root(d); if (dirname(d) === d) return null; }
+}
+
+function editHook(input) {
+  const cwd = input.cwd || process.cwd(), home = root(cwd), byRepo = new Map();
+  for (const p0 of editPaths(input)) {
+    const p = isAbsolute(p0) ? p0 : join(cwd, p0), r = repoOfFile(p), f = r && repoRel(r, p);
+    if (f && !f.startsWith("..")) byRepo.set(r, [...new Set([...(byRepo.get(r) || []), f])]);
+  }
+  // Once per (session, file, rule set) — not once per (session, file): a decision reversed while
+  // this agent works must reach its NEXT edit of a file it already touched. Once-per-file left an
+  // agent mid-file on the old rule, unflagged (reversal-midwork eval, 2026-09-25: 0/3).
+  const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), parts = [];
+  for (const [r, files] of byRepo) {
+    refreshDefault(r, false); // a reversal pushed from another clone (see refreshDefault)
+    const rows = load(r);
+    if (!rows) continue; // that repo has not opted in → silent
+    if (r === home) { // the prompt surface reads these as paths in the session's own repo
+      const sf = sessFile(input.session_id, "edit"), touched = readJson(sf, []), fresh = files.filter((f) => !touched.includes(f));
+      if (fresh.length) try { writeFileSync(sf, JSON.stringify([...touched, ...fresh].slice(-50))); } catch {}
+    }
+    const st = stale(r, rows);
+    for (const f of files) {
+      const key = `${r}\u0000${f}`, sig = govSig(rows, f), label = r === home ? f : join(r, f);
+      if (seen[key] === sig) continue;
+      const drift = key in seen ? renderDrift(rows, f, seen[key], label) : [];
+      delete seen[key]; seen[key] = sig; // re-insert: the most recent entries survive the cap below
+      // The edit is the moment a rule is needed, and a one-line rule is cheap: a wider cap than the
+      // prompt surface, whose matches are lexical guesses.
+      const rv = relevant(rows, { files: [f], cap: 10 }), sf1 = st.filter((x) => x.file === f);
+      if (!drift.length && !rv.decisions.length && !rv.proposed.length && !sf1.length) continue;
+      logFires(r, sf1, "edit");
+      logShown(r, "edit", rv.decisions.length);
+      parts.push(`# Trailstone — governing ${label}\n` + [drift.length ? DRIFT_HEAD + drift.join("\n") : "", renderStale(sf1), renderRelevant(rv, "This file is governed by", `governing ${label}`)].filter(Boolean).join("\n\n"));
+    }
+  }
+  try { writeFileSync(kf, JSON.stringify(Object.fromEntries(Object.entries(seen).slice(-50)))); } catch {}
+  if (!parts.length) process.exit(0);
+  return emit("PreToolUse", parts.join("\n\n"));
+}
+
+// A decision governing a file this agent edited was reversed AFTER it last saw that file's rules:
+// its work there followed the old rule, it is uncommitted (so `stale` skips it) and will be
+// committed after the reversal (so `stale` reads it as addressed). The agent that wrote it is
+// still here — ask it before the turn ends. Once: the continuation carries stop_hook_active.
+// Every repo the session edited is checked, not only the one it was opened in.
+function driftCheck(input) {
+  const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), rowsOf = new Map(), moved = [];
+  for (const [k, s] of Object.entries(seen)) {
+    const i = k.indexOf("\u0000"), r = k.slice(0, i), f = k.slice(i + 1);
+    if (!rowsOf.has(r)) { refreshDefault(r, true); rowsOf.set(r, load(r)); }
+    const rows = rowsOf.get(r);
+    if (rows && govSig(rows, f) !== s) moved.push({ k, r, f, s, rows });
+  }
+  if (!moved.length) return;
+  const home = root(input.cwd || process.cwd());
+  const lines = moved.flatMap((m) => renderDrift(m.rows, m.f, m.s, m.r === home ? m.f : join(m.r, m.f)));
+  try { writeFileSync(kf, JSON.stringify({ ...seen, ...Object.fromEntries(moved.map((m) => [m.k, govSig(m.rows, m.f)])) })); } catch {}
+  let also = "";
+  const rows = home && (rowsOf.get(home) ?? load(home));
+  if (rows && captureMode() === "inband" && input.transcript_path) try {
+    const t = (lastTurn(input.transcript_path)?.files || []).map((p) => repoRel(home, p)).filter((f) => f && !f.startsWith(".."));
+    if (t.length) also = "\n\nThen, separately: " + inbandAsk(t, [...new Map(t.flatMap((f) => governing(rows, f)).map((d) => [d.id, d])).values()]);
+  } catch {}
+  process.stdout.write(JSON.stringify({ decision: "block", reason: DRIFT_HEAD + lines.join("\n") + "\nRe-check each file against the new decision and fix what still follows the old one, then say what you changed." + also, systemMessage: DRIFT_NOTE }));
   process.exit(0);
 }
 
@@ -1833,6 +1862,22 @@ function selfcheck() {
     const s1 = stop();
     ok(s1.decision === "block" && /src\/b\.ts/.test(s1.reason) && !/src\/a\.ts/.test(s1.reason) && /not an error/.test(s1.systemMessage || ""), "Stop asks about the file whose rules moved since the agent last saw them (b), not the one it was already re-shown (a)");
     ok(!stop().decision && !stop({ stop_hook_active: true }).decision, "Stop asks about a drift once, and never on the continuation");
+    // Cross-repo: a session opened in ANOTHER repo, or in no repo at all, editing this one. The hook
+    // used the session's repo, dropped the path as "outside" it, and said nothing (bwmi dogfood).
+    const other = join(tmpdir(), `trailstone-home-${Date.now()}`), bare = `${other}-bare`;
+    mkdirSync(other); mkdirSync(bare); spawnSync("git", ["init", "-q"], { cwd: other });
+    let prevId = "d_ms";
+    for (const [cwd, what] of [[other, "another repo"], [bare, "no repo"]]) {
+      const sx = `x-${what.replace(/ /g, "")}-${Date.now()}`;
+      const hx = (input) => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env, input: JSON.stringify({ cwd, session_id: sx, ...input }) }).stdout;
+      const ex = hx({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: join(d5, "src", "a.ts") } });
+      ok(/timestamps are/.test(ex) && ex.includes(join(d5, "src", "a.ts")), `edit hook follows the file's repo, not the session's (${what}), and names it by full path`);
+      const id = `d_x${sx}`;
+      append(d5, { id, at: new Date().toISOString(), by: "t", decision: `timestamps are seconds (${what})`, scope: ["src/"], supersedes: prevId }); prevId = id;
+      let sx1 = {}; try { sx1 = JSON.parse(hx({ hook_event_name: "Stop" })); } catch {}
+      ok(sx1.decision === "block" && sx1.reason.includes(join(d5, "src", "a.ts")), `Stop drift check covers files edited in another repo (${what})`);
+    }
+    rmSync(other, { recursive: true, force: true }); rmSync(bare, { recursive: true, force: true });
     rmSync(d5, { recursive: true, force: true });
   }
   { // A repo reached through a symlink (macOS /var → /private/var): git reports the real root, the harness

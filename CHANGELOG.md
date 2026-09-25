@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Fixed — an agent editing a repo other than the one its session opened in got no warnings.** The
+edit hook and the `Stop` drift check took the repo from the session's working directory and dropped
+every path outside it as out of scope — silently, while `doctor` in the edited repo said "watching".
+A session opened in one repo (or in a parent folder of several) that edited another was told nothing.
+Both now follow each edited file to its own repo and ledger, and name files outside the session's repo
+by full path. The `Stop` fetch now runs for the repos the agent edited, not for the session's folder.
+Capture still asks only about the session's own repo, because `decide` writes to that ledger.
+
 **Fixed — a ledger without a final newline swallowed the next decision.** `decide`, `reverse` and
 `validate` append to `.trailstone/decisions.yml`; a file saved without a trailing newline (a hand edit,
 a migration) got the new row glued onto its last line, so the row merged into the previous entry and
