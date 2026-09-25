@@ -31,6 +31,12 @@ $ git push
 Your agent sees the same warning *before* it edits the file, with the old text and the new one,
 so it re-checks the work instead of building on ground that moved.
 
+**Why not just a CLAUDE.md?** For rules that stay put, a CLAUDE.md is fine — we measured it
+holding up as well as trailstone. The difference is a decision *changed mid-work*: a running agent
+reads CLAUDE.md once, at session start, so editing it reached 0 of 9 agents already working.
+trailstone reached 15 of 15, in one checkout and in per-agent worktrees, and 9 of 9 across
+separate clones (via a fetch of origin's default branch).
+
 ## What it does and doesn't catch (read this before judging it)
 
 **It fires when a *decision* changes while code still rests on the old one — not when code

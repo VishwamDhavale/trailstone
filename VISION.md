@@ -1,8 +1,8 @@
 # Trailstone
 
-> **Trailstone keeps an AI faithful to what you decided — across sessions, people, and
-> tools — and when a decision is reversed, it names exactly which work is now
-> suspect, so it gets re-checked before anyone builds further.**
+> **When a decision is reversed mid-work, Trailstone carries the new rule to every agent
+> already running — across sessions, worktrees, clones and tools — and names exactly which
+> work now rests on the old one, so it gets re-checked before anyone builds further.**
 
 A trailstone is a stack of stones a traveler leaves to mark the trail, so whoever comes
 after does not lose the path. This is that, for a codebase built with an AI over
@@ -50,6 +50,23 @@ work and never spends your tokens on its own. It is deliberately domain-general:
 today a "scope" is a file or a directory, but the same idea holds for a document, a
 spreadsheet tab, or any unit of work.
 
+## Where it earns its place — and where a CLAUDE.md is enough
+
+We measured this against the free default, and the answer is not "better memory".
+
+- **Delivering rules that don't change: a CLAUDE.md is enough.** Up to 100 rules, agents
+  honored a plain CLAUDE.md about as well as Trailstone's surfacing, and it costs less. If your
+  decisions are written down and stay put, you do not need this tool.
+- **A decision reversed while agents are working: only Trailstone reaches them.** A running
+  agent reads CLAUDE.md once, at session start. Change it mid-work and 0 of 9 running agents
+  noticed — identical to not changing it. Trailstone's edit hook and `Stop` drift check reached
+  15 of 15, in one shared checkout and with one worktree per agent, and a reversal pushed from
+  another clone reached 9 of 9.
+
+So that is the pitch: not a smarter place to write rules down, but the thing that makes
+*changing* a rule safe once work is under way — for the agents already running and for the
+committed work that rested on the old rule.
+
 ## The core loop — five verbs
 
 Everything Trailstone does is one of these. This is the whole product.
@@ -66,7 +83,7 @@ Plus the feeder that makes the loop real without anyone remembering to log:
 
 | Feeder | What it means |
 |---|---|
-| **Capture** | Decisions can enter passively from the work stream — a cheap judge reads the end of an AI turn and proposes anything that looks like a real decision. Proposals bind nothing until a human confirms. Precision over recall. |
+| **Capture** | Decisions can enter passively from the work stream — at the end of a turn that wrote a file, the running agent is asked once to record anything it committed to (an opt-in judge can do this instead). Proposals bind nothing until a human confirms. Precision over recall. |
 
 ## What the local tool proves *today* (be skeptical — try it)
 
@@ -78,7 +95,7 @@ Plus the feeder that makes the loop real without anyone remembering to log:
   entry); a file is *stale* when its last commit predates a reversal of a decision
   whose scope matches it; a stale flag clears when you edit + commit the file, or
   record that you re-checked it and it still holds.
-- **It surfaces into your AI agent** via Claude Code hooks: the decisions governing a
+- **It surfaces into your AI agent** via Claude Code, Codex and Cursor hooks: the decisions governing a
   file appear in the agent's context *before* it edits that file, with the old text
   and the new one.
 - **It blocks at the push** and in CI: a stale file about to be pushed fails the
@@ -104,16 +121,19 @@ Concretely — the layers, and how portable each already is:
 | **The ledger** (`.trailstone/decisions.yml`) | **Universal.** Plain YAML in your repo; any tool, agent or language can read it. |
 | **Enforcement** (pre-push hook, CI Action) | **Universal.** Git does not care what wrote the code. |
 | **Pull** — an agent *asking* "what governs this file?" | **Universal, shipped.** `trailstone mcp` speaks MCP on stdio for any MCP client; `install` also writes agent rules into `AGENTS.md` / Cursor rules. |
-| **Push** — the warning *injected before* the edit, unasked | **Claude Code and Cursor.** Each has its own hook system; there is no shared standard, so each needs a shim. |
+| **Push** — the warning *injected before* the edit, unasked | **Claude Code, Codex and Cursor.** Each has its own hook system; there is no shared standard, so each needs a shim. |
 
 That last row is where the work is, because **push is the differentiator.** We measured it:
 agents do not reliably *remember* to ask, and a warning an agent must choose to look up is a
 warning it skips.
 
-Two harnesses have it today, and they are not the same shape:
+Three harnesses have it today, and they are not the same shape:
 
 - **Claude Code** — `PreToolUse` returns `additionalContext` alongside an *allow*. The agent is
   told, nothing is blocked.
+- **Codex** — the same hook shape from `~/.codex/hooks.json`; edits arrive as `apply_patch`,
+  which Trailstone reads for the paths it touches. Codex runs a new hook only after you trust it
+  in `/hooks`.
 - **Cursor** — two routes, both confirmed live. `install` writes `.cursor/hooks.json`, which works
   with no Claude Code present; and Cursor *imports* Claude Code's hook entries and calls them under
   its own event names, so `hook` answers both dialects. Either way,
@@ -122,17 +142,18 @@ Two harnesses have it today, and they are not the same shape:
   genuinely *stale* — the same condition that already blocks a push — and allows the retry.
   Merely-governed edits are never blocked: that would be new interference bought with no safety.
 
-Codex, Windsurf and Claude Desktop are still pull-only. A shim that gets unasked pre-edit
+Windsurf and Claude Desktop are still pull-only. A shim that gets unasked pre-edit
 surfacing working in one of those is the most valuable contribution to this project.
 
 ## Open directions (not a roadmap we are guarding — things worth building)
 
 - **Push shims for the remaining harnesses.** Pull works everywhere (MCP + agent rules); push
-  works in Claude Code and Cursor. Codex, Windsurf and Claude Desktop are still pull-only, and a
+  works in Claude Code, Codex and Cursor. Windsurf and Claude Desktop are still pull-only, and a
   hook shim for one of them over the same ledger is the most useful thing to build — most useful
   of all if you are the person who lives in that editor daily.
 - **Teams.** A reversal by one person reaching another at *their* next relevant moment.
-  The YAML-in-repo design is meant to make this a clone rather than a database.
+  Across clones this already works through a fetch of origin's default branch; what is
+  missing is real teams using it.
 - **A GitHub App** turning a stale flag into an inline check-run annotation on the exact
   lines, with "re-affirm" / "supersede" actions in the PR.
 - **Richer scope** — from files to globs to symbols/modules ("the auth module").
@@ -187,7 +208,7 @@ What holds, and what doesn't:
 
 ## Status
 
-v0.2, local-first, Apache-2.0 licensed. The mechanism is real and self-verifying — the
+v0.3, local-first, Apache-2.0 licensed. The mechanism is real and self-verifying — the
 selfcheck runs in CI on Linux, macOS and Windows across Node 20/22/24. Everything above
 the local tool is a direction put out for validation, not a finished system. What it has
 *not* had yet is strangers' repos: submodules, worktrees, shallow clones, monorepos. If
