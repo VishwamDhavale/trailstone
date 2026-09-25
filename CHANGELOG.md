@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3
 
 **Fixed — `install` on a repo it had already set up.** It reported its own pre-push hook as someone
 else's and told you to add the line that hook already runs; it now recognises the hook it wrote,
