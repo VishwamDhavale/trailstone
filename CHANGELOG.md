@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 **Fixed — agents in git worktrees and on feature branches never saw a reversal made on main.** Each
 checkout read its own branch's copy of the ledger, so a decision reversed and committed on the default
