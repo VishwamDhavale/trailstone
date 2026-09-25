@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 **Fixed — every hook fell silent in a repo reached through a symlink or a Windows short name.** git
 reports the repository root with symlinks and short names resolved (`/private/var/…` on macOS,
