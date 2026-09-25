@@ -477,6 +477,18 @@ function renderRelevant({ decisions, proposed: p, more = 0 }, heading, moreCmd =
 // ── hooks ─────────────────────────────────────────────────────────────────────
 const sessFile = (sid, tag) => join(tmpdir(), `trailstone-${tag}-${String(sid || "nosession").replace(/[^a-zA-Z0-9_-]/g, "")}.json`);
 const readJson = (p, d) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return d; } };
+// Files a tool call is about to change. Claude Code and Cursor pass file_path; Codex edits through
+// apply_patch, whose tool_input.command IS the patch — possibly several files, paths absolute or
+// relative to the session cwd. Reading only file_path made every Codex edit invisible to the edit
+// hook, and so to the Stop re-check too.
+function editPaths(input) {
+  const ti = input.tool_input || {}, one = ti.file_path || ti.notebook_path;
+  if (one) return [one];
+  const patch = typeof ti.command === "string" ? ti.command : typeof ti.input === "string" ? ti.input : "";
+  if (!/^\*\*\* Begin Patch/m.test(patch)) return [];
+  return [...patch.matchAll(/^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$|^\*\*\* Move to: (.+?)\s*$/gm)]
+    .map((m) => m[1] || m[2]).map((p) => (isAbsolute(p) ? p : join(input.cwd || process.cwd(), p)));
+}
 // The rule set an agent was shown for a file: ids of the decisions governing it. A different set
 // later means the rules moved under the agent while it worked.
 const govSig = (rows, f) => governing(rows, f).map((d) => d.id).sort().join(",");
@@ -538,26 +550,31 @@ async function hook() {
     return emit(event, "# Trailstone — relevant to this request\n" + [g, renderStale(st), renderRelevant(rv, "Relevant decisions in force")].filter(Boolean).join("\n\n"));
   }
   if (event === "PreToolUse") {
-    const fp = input.tool_input?.file_path || input.tool_input?.notebook_path;
-    if (!fp) process.exit(0);
-    const f = rel(fp);
-    if (!f || f.startsWith("..")) process.exit(0);
-    const sf = sessFile(input.session_id, "edit"), touched = readJson(sf, []);
-    if (!touched.includes(f)) try { writeFileSync(sf, JSON.stringify([...touched, f].slice(-50))); } catch {}
+    const files = [...new Set(editPaths(input).map(rel))].filter((f) => f && !f.startsWith(".."));
+    if (!files.length) process.exit(0);
+    const sf = sessFile(input.session_id, "edit"), touched = readJson(sf, []), fresh = files.filter((f) => !touched.includes(f));
+    if (fresh.length) try { writeFileSync(sf, JSON.stringify([...touched, ...fresh].slice(-50))); } catch {}
     // Once per (session, file, rule set) — not once per (session, file): a decision reversed while
     // this agent works must reach its NEXT edit of a file it already touched. Once-per-file left an
     // agent mid-file on the old rule, unflagged (reversal-midwork eval, 2026-09-25: 0/3).
-    const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), key = `${r}\u0000${f}`, sig = govSig(rows, f);
-    if (seen[key] === sig) process.exit(0);
-    const drift = key in seen ? renderDrift(rows, f, seen[key]) : [];
-    try { writeFileSync(kf, JSON.stringify(Object.fromEntries([...Object.entries(seen).filter(([k]) => k !== key).slice(-49), [key, sig]]))); } catch {}
-    // The edit is the moment a rule is needed, and a one-line rule is cheap: a wider cap than the
-    // prompt surface, whose matches are lexical guesses.
-    const rv = relevant(rows, { files: [f], cap: 10 }), st = stale(r, rows).filter((s) => s.file === f);
-    if (!drift.length && !rv.decisions.length && !rv.proposed.length && !st.length) process.exit(0);
-    logFires(r, st, "edit");
-    logShown(r, "edit", rv.decisions.length);
-    return emit(event, `# Trailstone — governing ${f}\n` + [drift.length ? DRIFT_HEAD + drift.join("\n") : "", renderStale(st), renderRelevant(rv, "This file is governed by", `governing ${f}`)].filter(Boolean).join("\n\n"));
+    const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), parts = [];
+    const st = stale(r, rows);
+    for (const f of files) {
+      const key = `${r}\u0000${f}`, sig = govSig(rows, f);
+      if (seen[key] === sig) continue;
+      const drift = key in seen ? renderDrift(rows, f, seen[key]) : [];
+      delete seen[key]; seen[key] = sig; // re-insert: the most recent entries survive the cap below
+      // The edit is the moment a rule is needed, and a one-line rule is cheap: a wider cap than the
+      // prompt surface, whose matches are lexical guesses.
+      const rv = relevant(rows, { files: [f], cap: 10 }), sf1 = st.filter((x) => x.file === f);
+      if (!drift.length && !rv.decisions.length && !rv.proposed.length && !sf1.length) continue;
+      logFires(r, sf1, "edit");
+      logShown(r, "edit", rv.decisions.length);
+      parts.push(`# Trailstone — governing ${f}\n` + [drift.length ? DRIFT_HEAD + drift.join("\n") : "", renderStale(sf1), renderRelevant(rv, "This file is governed by", `governing ${f}`)].filter(Boolean).join("\n\n"));
+    }
+    try { writeFileSync(kf, JSON.stringify(Object.fromEntries(Object.entries(seen).slice(-50)))); } catch {}
+    if (!parts.length) process.exit(0);
+    return emit(event, parts.join("\n\n"));
   }
   // A decision governing a file this agent edited was reversed AFTER it last saw that file's rules:
   // its work there followed the old rule, it is uncommitted (so `stale` skips it) and will be
@@ -1289,12 +1306,14 @@ function doctor() {
   // for `trailstone.mjs hook`, and broke the moment install started quoting the path
   // (`node "…/trailstone.mjs" hook`) — doctor then reported 0/4 while all four were live,
   // which is the exact false "not watching" this command exists to prevent.
-  const n = (() => { try {
-    const h = readJson(join(homedir(), ".claude", "settings.json"), {}).hooks ?? {};
-    return Object.values(h).flat().flatMap((g) => g.hooks || [])
-      .filter((k) => (k.command || "").includes(basename(SELF)) && /\bhook\b\s*$/.test(k.command || "")).length;
-  } catch { return 0; } })();
+  const n = countHooks(CLAUDE_HOOKS());
   say(n >= 4, n >= 4 ? "all 4 Claude Code hooks installed" : `only ${n}/4 hooks installed — run \`install\``);
+  if (existsSync(join(homedir(), ".codex"))) { // informational when absent: having Codex is not a requirement
+    const c = countHooks(CODEX_HOOKS());
+    if (c >= 4) say(true, "all 4 Codex hooks installed — Codex runs them only after you trust them in `codex` → /hooks");
+    else if (c) say(false, `only ${c}/4 Codex hooks installed — run \`install\``);
+    else console.log("  --  Codex found, no trailstone hooks in ~/.codex/hooks.json — `install` adds them");
+  }
   // Phrase per state: "✗ pre-push guard installed" reads as installed. doctor is the one command
   // whose entire job is telling you the truth about your setup, so its negatives must read negative.
   const pp = existsSync(join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push"));
@@ -1531,18 +1550,11 @@ function writeCursorHooks(r) {
 // people are stuck hand-editing JSON to get rid of it. Removes only the WIRING — never the
 // ledger, never AGENTS.md: those are the user's decisions and their repo's content.
 function uninstall() {
-  const st = join(homedir(), ".claude", "settings.json"), s = readJson(st, {});
-  let removed = 0;
-  for (const ev of Object.keys(s.hooks || {})) {
-    s.hooks[ev] = (s.hooks[ev] || []).map((g) => {
-      const keep = (g.hooks || []).filter((h) => !(h.command || "").includes(basename(SELF)));
-      removed += (g.hooks || []).length - keep.length;
-      return { ...g, hooks: keep };
-    }).filter((g) => (g.hooks || []).length);
-    if (!s.hooks[ev].length) delete s.hooks[ev];
+  for (const st of [CLAUDE_HOOKS(), CODEX_HOOKS()]) {
+    if (!existsSync(st)) continue;
+    const removed = unwireHooks(st);
+    console.log(removed === null ? `could not write ${st} — remove the ${basename(SELF)} entries by hand` : `removed ${removed} hook${removed === 1 ? "" : "s"} from ${st}`);
   }
-  try { writeFileSync(st, JSON.stringify(s, null, 2)); console.log(`removed ${removed} hook${removed === 1 ? "" : "s"} from ${st}`); }
-  catch { console.log(`could not write ${st} — remove the ${basename(SELF)} entries by hand`); }
 
   const r = root();
   if (r) {
@@ -1575,15 +1587,42 @@ function uninstall() {
   console.log("Left alone on purpose: .trailstone/decisions.yml (your decisions) and any AGENTS.md block (your repo's content). Delete those yourself if you want them gone.");
 }
 
-function install(f = {}) {
-  const st = join(homedir(), ".claude", "settings.json"), s = readJson(st, {});
-  s.hooks = s.hooks || {};
-  for (const [ev, matcher] of [["SessionStart"], ["UserPromptSubmit"], ["PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"], ["Stop"]]) {
+// Claude Code and Codex read the same hook shape (event → [{ matcher?, hooks: [{ type, command }] }]);
+// they differ in the file and in how an edit is named (Codex edits through apply_patch).
+const CLAUDE_HOOKS = () => join(homedir(), ".claude", "settings.json");
+const CODEX_HOOKS = () => join(homedir(), ".codex", "hooks.json");
+const HOOK_EVENTS = { claude: "Edit|Write|MultiEdit|NotebookEdit", codex: "apply_patch|Edit|Write" };
+const ours = (h) => (h.command || "").includes(basename(SELF));
+function wireHooks(file, editMatcher) { // idempotent: adds OUR entry per event, keeps everyone else's
+  const s = readJson(file, {}); s.hooks = s.hooks || {};
+  for (const [ev, matcher] of [["SessionStart"], ["UserPromptSubmit"], ["PreToolUse", editMatcher], ["Stop"]]) {
     s.hooks[ev] = s.hooks[ev] || [];
-    if (!s.hooks[ev].some((g) => (g.hooks || []).some((h) => (h.command || "").includes(basename(SELF))))) s.hooks[ev].push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `"${NODE_ABS}" "${SELF_CMD}" hook` }] });
+    if (!s.hooks[ev].some((g) => (g.hooks || []).some(ours))) s.hooks[ev].push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `"${NODE_ABS}" "${SELF_CMD}" hook` }] });
   }
-  mkdirSync(dirname(st), { recursive: true }); writeFileSync(st, JSON.stringify(s, null, 2));
+  mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(s, null, 2));
+}
+function unwireHooks(file) { // strips only OUR entries; returns how many, or null if the file could not be written
+  const s = readJson(file, null); if (!s?.hooks) return 0;
+  let removed = 0;
+  for (const ev of Object.keys(s.hooks)) {
+    s.hooks[ev] = (s.hooks[ev] || []).map((g) => { const keep = (g.hooks || []).filter((h) => !ours(h)); removed += (g.hooks || []).length - keep.length; return { ...g, hooks: keep }; }).filter((g) => (g.hooks || []).length);
+    if (!s.hooks[ev].length) delete s.hooks[ev];
+  }
+  try { writeFileSync(file, JSON.stringify(s, null, 2)); return removed; } catch { return null; }
+}
+const countHooks = (file) => { try { return Object.values(readJson(file, {}).hooks ?? {}).flat().flatMap((g) => g.hooks || []).filter((k) => ours(k) && /\bhook\b\s*$/.test(k.command || "")).length; } catch { return 0; } };
+
+function install(f = {}) {
+  const st = CLAUDE_HOOKS();
+  wireHooks(st, HOOK_EVENTS.claude);
   console.log(`hooks → ${st}`);
+  // Codex runs Claude-Code-shaped hooks from ~/.codex/hooks.json — but only once the user TRUSTS them:
+  // Codex hashes each hook and skips new or changed ones until approved in its /hooks screen. We write
+  // them and say so; we never flip bypass_hook_trust, which would switch that review off for every hook.
+  if (existsSync(join(homedir(), ".codex"))) {
+    wireHooks(CODEX_HOOKS(), HOOK_EVENTS.codex);
+    console.log(`hooks → ${CODEX_HOOKS()}\n  Codex skips new hooks until you trust them: run \`codex\`, open /hooks, and trust the ${basename(SELF)} entries (once; again after an upgrade changes them).`);
+  }
   const r = root();
   if (r) {
     const pp = join(git(["rev-parse", "--git-dir"], r), "hooks", "pre-push");
@@ -1877,6 +1916,32 @@ function selfcheck() {
     const left = Object.values(after.hooks || {}).flat().flatMap((g) => g.hooks || []).filter((k) => (k.command || "").includes(basename(SELF)));
     ok(left.length === 0, `uninstall removes every hook it wrote (${left.length} left)`);
     ok(existsSync(join(dir, LEDGER)), "uninstall does NOT delete the ledger");
+    ok(!existsSync(join(home, ".codex", "hooks.json")), "install writes no Codex hooks when the user has no ~/.codex");
+    // Codex: same hook shape in ~/.codex/hooks.json, edits named apply_patch; someone else's hook survives both ways.
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    writeFileSync(join(home, ".codex", "hooks.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "other-tool stop" }] }] } }));
+    const env = { ...process.env, HOME: home, USERPROFILE: home };
+    spawnSync(process.execPath, [SELF, "install", "--no-rules"], { cwd: dir, encoding: "utf8", env });
+    const cx = JSON.parse(readFileSync(join(home, ".codex", "hooks.json"), "utf8")).hooks;
+    ok(countHooks(join(home, ".codex", "hooks.json")) === 4 && /apply_patch/.test(cx.PreToolUse?.[0]?.matcher || "") && JSON.stringify(cx).includes("other-tool stop"), "install wires Codex (4 hooks, PreToolUse matches apply_patch) and keeps the user's own hooks");
+    ok(/all 4 Codex hooks installed/.test(spawnSync(process.execPath, [SELF, "doctor"], { cwd: dir, encoding: "utf8", env }).stdout), "doctor sees the Codex hooks");
+    spawnSync(process.execPath, [SELF, "uninstall"], { cwd: dir, encoding: "utf8", env });
+    ok(countHooks(join(home, ".codex", "hooks.json")) === 0 && readFileSync(join(home, ".codex", "hooks.json"), "utf8").includes("other-tool stop"), "uninstall strips only our Codex hooks");
+    rmSync(home, { recursive: true, force: true });
+  }
+  { // Codex edits arrive as apply_patch: tool_input.command is the patch, one call may touch several files.
+    const d8 = join(tmpdir(), `trailstone-codex-${Date.now()}`); mkdirSync(join(d8, "src"), { recursive: true });
+    spawnSync("git", ["init", "-q"], { cwd: d8 });
+    mkdirSync(join(d8, ".trailstone")); writeFileSync(join(d8, LEDGER), HEADER);
+    append(d8, { id: "d_c1", at: "2025-01-01T00:00:00Z", by: "t", decision: "timestamps are ISO strings", scope: ["src/"] });
+    const sid = `codex-${Date.now()}`, env = { ...process.env, TRAILSTONE_CAPTURE: "0", TRAILSTONE_FIRES_LOG: join(d8, "f.log"), TRAILSTONE_SHOWN_LOG: join(d8, "s.log") };
+    const patch = (body) => { const o = spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env, input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: d8, session_id: sid, tool_name: "apply_patch", tool_input: { command: `*** Begin Patch\n${body}*** End Patch\n` } }) }).stdout; try { return JSON.parse(o).hookSpecificOutput.additionalContext; } catch { return o; } };
+    const first = patch(`*** Update File: ${join(d8, "src", "a.ts")}\n@@\n-a\n+b\n*** Add File: src/b.ts\n+x\n`);
+    ok(/governing src\/a\.ts/.test(first) && /governing src\/b\.ts/.test(first) && /ISO strings/.test(first), "an apply_patch touching two files (absolute and cwd-relative paths) surfaces the rules for each");
+    append(d8, { id: "d_c2", at: "2025-02-01T00:00:00Z", by: "t", decision: "timestamps are epoch ms", scope: ["src/"], supersedes: "d_c1" });
+    ok(/CHANGED WHILE YOU WORKED/.test(patch(`*** Update File: src/a.ts\n@@\n-b\n+c\n`)), "a later apply_patch re-fires after a reversal mid-work");
+    ok(patch(`*** Update File: src/a.ts\n@@\n-c\n+d\n`) === "", "and is silent while the rules stay the same");
+    rmSync(d8, { recursive: true, force: true });
   }
 
   // The version the tool REPORTS is the version that shipped. It drifted once: the published
