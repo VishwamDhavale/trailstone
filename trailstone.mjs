@@ -555,7 +555,7 @@ async function hook() {
   // exiting 0 silently forever. Detect the dialect from the event name and answer in it.
   if (CURSOR_EVENTS.has(event)) return cursorHook(input);
   // Edits and the drift check follow the FILE's repo, not the session's: a session opened in one
-  // repo (or above any repo) that edits another was told nothing (bwmi dogfood, 2026-09-26).
+  // repo (or above any repo) that edits another was told nothing (found dogfooding, 2026-09-26).
   if (event === "PreToolUse") return editHook(input);
   if (event === "Stop" && !input.stop_hook_active && input.session_id) driftCheck(input); // exits when it blocks
   const r = root(input.cwd || process.cwd());
@@ -1328,7 +1328,7 @@ function doctor() {
 
   if (!r) {
     say(false, "not a git repository, so Trailstone records and surfaces nothing here");
-    // The trap that bit build-what-moves-india: the session sits one level ABOVE the repo.
+    // The trap that bit a real project: the session sits one level ABOVE the repo.
     const below = (() => { try {
       return readdirSync(process.cwd(), { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith("."))
         .filter((e) => existsSync(join(process.cwd(), e.name, ".git"))).map((e) => e.name);
@@ -1726,7 +1726,7 @@ function install(f = {}) {
 function selfcheck() {
   const dir = join(tmpdir(), `trailstone-check-${Date.now()}`); mkdirSync(dir, { recursive: true });
   // Every log the checks can write goes to the scratch dir, never the user's ~/.trailstone: selfcheck
-  // repos were 240 of 4503 lines in a real fires.log (bwmi dogfood). Spawned hooks inherit this env.
+  // repos were 240 of 4503 lines in a real fires.log. Spawned hooks inherit this env.
   for (const [k, f] of [["TRAILSTONE_FIRES_LOG", "fires.log"], ["TRAILSTONE_SHOWN_LOG", "surfaces.log"]])
     if (!process.env[k]) process.env[k] = join(dir, f);
   const g = (...a) => git(a, dir);
@@ -1875,7 +1875,7 @@ function selfcheck() {
     ok(s1.decision === "block" && /src\/b\.ts/.test(s1.reason) && !/src\/a\.ts/.test(s1.reason) && /not an error/.test(s1.systemMessage || ""), "Stop asks about the file whose rules moved since the agent last saw them (b), not the one it was already re-shown (a)");
     ok(!stop().decision && !stop({ stop_hook_active: true }).decision, "Stop asks about a drift once, and never on the continuation");
     // Cross-repo: a session opened in ANOTHER repo, or in no repo at all, editing this one. The hook
-    // used the session's repo, dropped the path as "outside" it, and said nothing (bwmi dogfood).
+    // used the session's repo, dropped the path as "outside" it, and said nothing.
     const other = join(tmpdir(), `trailstone-home-${Date.now()}`), bare = `${other}-bare`;
     mkdirSync(other); mkdirSync(bare); spawnSync("git", ["init", "-q"], { cwd: other });
     let prevId = "d_ms";
