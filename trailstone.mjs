@@ -1725,6 +1725,10 @@ function install(f = {}) {
 // The one runnable check: a throwaway repo, a decision, a reversal, the three clears.
 function selfcheck() {
   const dir = join(tmpdir(), `trailstone-check-${Date.now()}`); mkdirSync(dir, { recursive: true });
+  // Every log the checks can write goes to the scratch dir, never the user's ~/.trailstone: selfcheck
+  // repos were 240 of 4503 lines in a real fires.log (bwmi dogfood). Spawned hooks inherit this env.
+  for (const [k, f] of [["TRAILSTONE_FIRES_LOG", "fires.log"], ["TRAILSTONE_SHOWN_LOG", "surfaces.log"]])
+    if (!process.env[k]) process.env[k] = join(dir, f);
   const g = (...a) => git(a, dir);
   g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t");
   mkdirSync(join(dir, "src", "auth"), { recursive: true });
