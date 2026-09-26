@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.6
+
+Includes everything in 0.3.5 (tagged, not published to npm).
 
 **Fixed — agents stalled on "which rule is current".** Recorded in the interactive Claude Code app, agents
 got the change notice every time but switched cleanly only half the time: shown a new rule, they read it
@@ -26,7 +28,7 @@ now comes only when the turn looks like it chose something: the user stated a ru
 it picked over what, or the turn created a file. Measured on 36 recorded sessions: 0/12 no-decision
 turns asked, 24/30 decision turns asked. `TRAILSTONE_CAPTURE=always` restores asking every time.
 
-## 0.3.5
+## 0.3.5 (tagged, not published)
 
 **Changed — an agent can only propose a new goal.** The goal is shown to the agent every session and
 prompt, and the injection told it how to set a new one. Given an ambiguous "Nice." after it had asked
