@@ -11,6 +11,7 @@
     "architecture-decision-record"
   ],
   "license": "Apache-2.0",
+  "homepage": "https://trailstone.work",
   "type": "module",
   "bin": {
     "trailstone": "trailstone.mjs"

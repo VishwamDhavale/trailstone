@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `homepage` in package.json points at https://trailstone.work, so npm links to the site.
+
 ## 0.3.6
 
 Includes everything in 0.3.5 (tagged, not published to npm).
