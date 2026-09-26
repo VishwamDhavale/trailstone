@@ -495,12 +495,18 @@ export function relevant(rows, { files = [], q = "", cap = 5 } = {}) {
     const hit = (d.decision.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []).filter((w) => words.has(w));
     if (new Set(hit).size >= 2) seen.set(d.id, { ...d, because: `prompt: ${[...new Set(hit)].slice(0, 3).join(" ")}` });
   }
-  const all = [...seen.values()];
+  // A rule that replaced another says so, and a rule that lives only on the default branch says where:
+  // shown a new rule with neither, agents read it as a SECOND rule contradicting the one they had, or
+  // trusted their branch's older ledger file over it, and stalled (product-demo, interactive, 2/4 clean).
+  const byId = new Map(rows.map((x) => [x.id, x]));
+  const all = [...seen.values()].map((d) => ({ ...d, replaces: d.supersedes ? byId.get(d.supersedes)?.decision : undefined }));
   return { decisions: all.slice(0, cap), more: Math.max(0, all.length - cap), proposed: proposed(rows).filter((p) => !files.length || files.some((f) => scopeHits(p.scope, f))).slice(0, cap) };
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────────
-const line = (d) => `  - ${d.decision}${d.because ? ` [${d.because}]` : ""}${d.scope?.length ? ` (${d.scope.join(", ")})` : ""}`;
+const whereNote = (d) => d?._from ? ` — committed on ${d._from} after this branch's copy of the ledger: it is current, and ${LEDGER} in this checkout is behind` : "";
+const line = (d) => `  - ${d.decision}${d.because ? ` [${d.because}]` : ""}${d.scope?.length ? ` (${d.scope.join(", ")})` : ""}` +
+  (d.replaces ? `\n      REPLACES the earlier rule "${d.replaces}" — that one no longer applies${whereNote(d)}` : whereNote(d) ? `\n     ${whereNote(d)}` : "");
 function renderStale(list) {
   if (!list.length) return "";
   return "⚠️ STALE — these files were last committed BEFORE a decision governing them was reversed. Re-validate before building on them:\n" +
@@ -553,7 +559,8 @@ function renderDrift(rows, f, was, label = f) {
     let cur = id, next;
     for (let i = 0; i < 50 && (next = rows.find((x) => x.supersedes === cur && (x.kind ?? "decision") === "decision" && !x.status)); i++) cur = next.id;
     if (cur !== id && nowIds.has(cur)) replaced.add(cur);
-    out.push(`  - ${label}: was "${byId.get(id)?.decision ?? id}" → now "${cur !== id && nowIds.has(cur) ? byId.get(cur).decision : "(no longer in force)"}"`);
+    out.push(`  - ${label}: was "${byId.get(id)?.decision ?? id}" → now "${cur !== id && nowIds.has(cur) ? byId.get(cur).decision : "(no longer in force)"}"` +
+      (cur !== id && nowIds.has(cur) ? `\n    The old rule no longer applies anywhere; the new one replaces it${whereNote(byId.get(cur))}.` : ""));
   }
   for (const d of now) if (!prev.has(d.id) && !replaced.has(d.id)) out.push(`  - ${label}: new "${d.decision}"`);
   return out;
@@ -1890,6 +1897,14 @@ function selfcheck() {
     const { gov, props } = askContext(pr, ["src/routes/customers.js"], turn), ask = inbandAsk(["src/routes/customers.js"], gov, props);
     ok(props.map((x) => x.id).join() === "d_cur" && /\(proposed\) GET \/invoices/.test(ask) && /do NOT record a second decision/.test(ask), "capture ask lists a same-rule proposal from another file and says reverse, not add");
     ok(/every path the rule GOVERNS/.test(ask) && !/GOVERNS, from:/.test(ask), "capture ask scopes a rule by what it governs, not only the files touched");
+  }
+  { // A new rule says what it replaces and, when it lives only on the default branch, that it is current
+    // and this checkout's ledger file is behind (interactive recordings: agents stalled on both).
+    const rw = [{ id: "d_a", at: "2025-01-01", decision: "timestamps are ISO", scope: ["src/"] },
+      { id: "d_b", at: "2025-02-01", decision: "timestamps are epoch ms", scope: ["src/"], supersedes: "d_a", _from: "main" }];
+    const shown = renderRelevant(relevant(rw, { files: ["src/x.js"] }), "h"), drift = renderDrift(rw, "src/x.js", "d_a").join("\n");
+    ok(/REPLACES the earlier rule "timestamps are ISO"/.test(shown) && /committed on main .*is behind/.test(shown), `a replacement from main says what it replaces and that this checkout's ledger is behind (got: ${shown})`);
+    ok(/no longer applies anywhere/.test(drift) && /committed on main/.test(drift), `the drift notice says the old rule is gone and where the new one lives (got: ${drift})`);
   }
   writeFileSync(join(dir, "src", "auth", "jwt.ts"), "dirty"); ok(stale(dir).length === 0, "working-tree edit clears");
   g("checkout", "--", "src/auth/jwt.ts"); ok(stale(dir).length === 1, "revert restores the flag");

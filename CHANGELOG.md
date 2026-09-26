@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Fixed — agents stalled on "which rule is current".** Recorded in the interactive Claude Code app, agents
+got the change notice every time but switched cleanly only half the time: shown a new rule, they read it
+as a *second* rule contradicting the one they had, or trusted their branch's older ledger file over it.
+A rule that replaced another now says so ("REPLACES the earlier rule … — that one no longer applies"),
+and a rule that lives only on the default branch says it was committed there after this branch's copy
+of the ledger — it is current, and the local file is behind. The drift notice says the same.
+
 **Corrected — what a CLAUDE.md can and cannot do.** The README and VISION said an agent reads
 CLAUDE.md once, at session start, so editing it mid-work reached 0 of 9 running agents. That was
 measured with headless `claude -p` sessions. Recorded in the interactive Claude Code app, an agent
