@@ -3,8 +3,8 @@
 ## 0.3.4
 
 Everything in 0.3.3, which was tagged but never published: its new cross-repo selfcheck failed on
-Windows, where git and the temp directory spell the same folder differently. A warning about a file
-outside the session's repo now names it by the path the agent used.
+Windows. The hook was right; the check searched raw JSON, where Windows backslashes are escaped. A
+warning about a file outside the session's repo also now names it by the path the agent used.
 
 ## 0.3.3 (tagged, not published)
 
