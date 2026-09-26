@@ -546,13 +546,33 @@ function editPaths(input) {
   return [...patch.matchAll(/^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$|^\*\*\* Move to: (.+?)\s*$/gm)]
     .map((m) => m[1] || m[2]).map((p) => (isAbsolute(p) ? p : join(input.cwd || process.cwd(), p)));
 }
-// The rule set an agent was shown for a file: ids of the decisions governing it. A different set
-// later means the rules moved under the agent while it worked.
-const govSig = (rows, f) => governing(rows, f).map((d) => d.id).sort().join(",");
+// The rule set an agent was shown for a file: ids of the decisions governing it, plus "?id" for the
+// proposals scoped to it (the edit hook shows those too). A different binding set later means the
+// rules moved under the agent while it worked. A proposal it was shown that is later RATIFIED is not
+// a move: the text is the one it already read (a ratify fired "CHANGED WHILE YOU WORKED", 2026-09-26).
+// One it never saw (proposed after its edit) still counts as new when ratified.
+const govSig = (rows, f) => [...governing(rows, f).map((d) => d.id), ...proposed(rows).filter((d) => scopeHits(d.scope, f)).map((d) => `?${d.id}`)].sort().join(",");
+const sigParts = (sig) => {
+  const t = sig.split(",").filter(Boolean);
+  return { bound: t.filter((x) => !x.startsWith("?")), known: new Set(t.map((x) => x.replace(/^\?/, ""))) };
+};
+// Did the BINDING rules move? A rule binds now that the agent never saw (not even as a proposal), or
+// a rule it was bound by stopped binding. Proposals coming and going alone are not a move.
+const bindingMoved = (was, now) => {
+  const P = sigParts(was), N = sigParts(now).bound;
+  return N.some((id) => !P.known.has(id)) || P.bound.some((id) => !N.includes(id));
+};
+// The seen signature after a non-move: proposals the agent was shown that are now in force become
+// plain ids (so a later reversal of them reads was → now), and nothing it has not seen is added.
+const promoteSeen = (was, now) => {
+  const N = new Set(sigParts(now).bound);
+  return was.split(",").filter(Boolean).map((x) => (x.startsWith("?") && N.has(x.slice(1)) ? x.slice(1) : x)).sort().join(",");
+};
 // "was → now" for every decision in the old set that is no longer in force, following the
 // supersession chain to whatever replaced it; plus any decision that newly governs the file.
 function renderDrift(rows, f, was, label = f) {
-  const byId = new Map(rows.map((x) => [x.id, x])), now = governing(rows, f), nowIds = new Set(now.map((d) => d.id)), prev = new Set(was.split(",").filter(Boolean));
+  const byId = new Map(rows.map((x) => [x.id, x])), now = governing(rows, f), nowIds = new Set(now.map((d) => d.id));
+  const { bound, known } = sigParts(was), prev = new Set(bound);
   const out = [], replaced = new Set();
   for (const id of prev) {
     if (nowIds.has(id)) continue;
@@ -562,7 +582,7 @@ function renderDrift(rows, f, was, label = f) {
     out.push(`  - ${label}: was "${byId.get(id)?.decision ?? id}" → now "${cur !== id && nowIds.has(cur) ? byId.get(cur).decision : "(no longer in force)"}"` +
       (cur !== id && nowIds.has(cur) ? `\n    The old rule no longer applies anywhere; the new one replaces it${whereNote(byId.get(cur))}.` : ""));
   }
-  for (const d of now) if (!prev.has(d.id) && !replaced.has(d.id)) out.push(`  - ${label}: new "${d.decision}"`);
+  for (const d of now) if (!known.has(d.id) && !replaced.has(d.id)) out.push(`  - ${label}: new "${d.decision}"`);
   return out;
 }
 const DRIFT_HEAD = "⚠️ CHANGED WHILE YOU WORKED — a decision governing a file you already edited this session is no longer the one you were shown. What you wrote there followed the old rule:\n";
@@ -671,7 +691,8 @@ function editHook(input) {
     const st = stale(r, rows);
     for (const f of files) {
       const key = `${r}\u0000${f}`, sig = govSig(rows, f), label = r === home ? f : asGiven.get(key); // the agent's own path for it
-      if (seen[key] === sig) continue;
+      // Once per (session, file, binding rule set): a proposal appearing or being ratified is not a new rule set.
+      if (key in seen && !bindingMoved(seen[key], sig)) { seen[key] = promoteSeen(seen[key], sig); continue; }
       const drift = key in seen ? renderDrift(rows, f, seen[key], label) : [];
       delete seen[key]; seen[key] = sig; // re-insert: the most recent entries survive the cap below
       // The edit is the moment a rule is needed, and a one-line rule is cheap: a wider cap than the
@@ -704,8 +725,8 @@ function ownIds(transcriptPath) {
 // re-checked its own reversal twice in one run (drift-scenarios S1). A change that DROPPED a file from
 // a rule (its own too-narrow reversal) still fires — that one caught a real mistake in the same run.
 function ownChange(rows, was, now, own) {
-  const P = new Set(was.split(",").filter(Boolean)), N = new Set(now.split(",").filter(Boolean));
-  const added = [...N].filter((id) => !P.has(id)), removed = [...P].filter((id) => !N.has(id));
+  const P = sigParts(was), N = new Set(sigParts(now).bound);
+  const added = [...N].filter((id) => !P.known.has(id)), removed = P.bound.filter((id) => !N.has(id));
   if (!added.every((id) => own.has(id))) return false;
   return removed.every((id) => {
     let cur = id, next;
@@ -720,7 +741,8 @@ function driftCheck(input) {
     const i = k.indexOf("\u0000"), r = k.slice(0, i), f = k.slice(i + 1);
     if (!rowsOf.has(r)) { refreshDefault(r, true); rowsOf.set(r, load(r)); }
     const rows = rowsOf.get(r), now = rows && govSig(rows, f);
-    if (!rows || now === s) continue;
+    if (!rows) continue;
+    if (!bindingMoved(s, now)) { const p = promoteSeen(s, now); if (p !== s) quiet[k] = p; continue; }
     if (ownChange(rows, s, now, own)) quiet[k] = now; // its own change: remember the new rules, say nothing
     else moved.push({ k, r, f, s, rows });
   }
@@ -2003,6 +2025,25 @@ function selfcheck() {
     const s1 = stop();
     ok(s1.decision === "block" && /src\/b\.ts/.test(s1.reason) && !/src\/a\.ts/.test(s1.reason) && /not an error/.test(s1.systemMessage || ""), "Stop asks about the file whose rules moved since the agent last saw them (b), not the one it was already re-shown (a)");
     ok(!stop().decision && !stop({ stop_hook_active: true }).decision, "Stop asks about a drift once, and never on the continuation");
+    { // Ratifying is not a reversal. A proposal the agent was shown at its edit, ratified later, binds
+      // exactly the text it read: no "changed while you worked" (it fired on a ratify, 2026-09-26). A
+      // proposal made after the edit and then ratified is a rule the agent never saw: that one still asks.
+      const sidR = `ratify-${Date.now()}`;
+      const hkR = (input) => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env: { ...env, TRAILSTONE_FETCH: "0" }, input: JSON.stringify({ cwd: d5, session_id: sidR, ...input }) }).stdout;
+      const editR = (f) => { const o = hkR({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: join(d5, f) } }); try { return JSON.parse(o).hookSpecificOutput.additionalContext; } catch { return o; } };
+      const stopR = () => { try { return JSON.parse(hkR({ hook_event_name: "Stop" })); } catch { return {}; } };
+      const ratify = (id) => spawnSync(process.execPath, [SELF, "ratify", id], { cwd: d5, encoding: "utf8" });
+      writeFileSync(join(d5, "src", "c.ts"), "c");
+      append(d5, { id: "d_seen", at: "2025-03-01T00:00:00Z", by: "t", decision: "c.ts exports one function", scope: ["src/c.ts"], status: "proposed" });
+      ok(/exports one function/.test(editR("src/c.ts")), "edit hook shows a proposal scoped to the file");
+      ratify("d_seen");
+      ok(!stopR().decision && editR("src/c.ts") === "", "a proposal the agent was shown, then ratified, is not a change: Stop and the next edit stay silent");
+      append(d5, { id: "d_late", at: "2025-03-02T00:00:00Z", by: "t", decision: "c.ts has no default export", scope: ["src/c.ts"], status: "proposed" });
+      ok(!stopR().decision, "a proposal appearing after the edit binds nothing yet: no ask");
+      ratify("d_late");
+      const sR = stopR();
+      ok(sR.decision === "block" && /src\/c\.ts: new "c\.ts has no default export"/.test(sR.reason) && !/exports one function/.test(sR.reason), "a proposal the agent never saw, once ratified, is a new rule: Stop asks, naming only that one");
+    }
     // Cross-repo: a session opened in ANOTHER repo, or in no repo at all, editing this one. The hook
     // used the session's repo, dropped the path as "outside" it, and said nothing.
     const other = join(tmpdir(), `trailstone-home-${Date.now()}`), bare = `${other}-bare`;

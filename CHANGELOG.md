@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Fixed — ratifying a decision raised "CHANGED WHILE YOU WORKED".** A proposal the agent was shown when it edited a file, once ratified, binds exactly the text it already read; the edit hook and the end-of-turn check no longer treat that as a rule change. A proposal made after the edit, then ratified, still asks, since the agent never saw it.
 - `homepage` in package.json points at https://trailstone.work, so npm links to the site.
 
 ## 0.3.6
