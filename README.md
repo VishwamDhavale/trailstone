@@ -239,6 +239,8 @@ contribution to this project.
 
 ```
 init                          create .trailstone/decisions.yml (commit it)
+goal "<what this project is>"  set the goal every session sees; run from an AI agent's shell it is only
+                              PROPOSED until you `ratify` it — an agent never changes the goal by itself
 decide "<what>" --why "<why>" --scope src/auth/,src/api/tokens.ts
 reverse <id> "<new decision>" [--why ...] [--scope ...]   # inherits the old scope if omitted
 list [--all]                  decisions in force (--all includes superseded/proposed/rejected)

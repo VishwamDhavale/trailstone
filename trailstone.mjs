@@ -332,12 +332,21 @@ export const proposed = (rows) => rows.filter((x) => (x.kind ?? "decision") === 
 // The goal anchor (P0): what the project IS, said once per session and per prompt, so a
 // steering message that departs from it is named instead of silently obeyed. The LAST
 // goal row wins — a new goal is a new row, never an edit, same as decisions.
-export const goal = (rows) => rows.filter((x) => x.kind === "goal").at(-1) || null;
+export const goal = (rows) => rows.filter((x) => x.kind === "goal" && !x.status).at(-1) || null;
+// Goal changes waiting for a human: an agent that sets the goal only proposes it. Given "Nice." after
+// asking the user to choose, an agent rewrote the goal itself, and that goal is shown every turn
+// (drift-scenarios S5). The human outranks the ledger, so the human ratifies a goal.
+export const proposedGoals = (rows) => rows.filter((x) => x.kind === "goal" && x.status === "proposed");
+// Is this command being run by an AI agent's shell rather than a person's terminal? Claude Code sets
+// CLAUDECODE in every shell it spawns; Codex and Cursor set their own. TRAILSTONE_AGENT=1 forces it.
+const agentShell = () => ["CLAUDECODE", "CODEX_SANDBOX", "CODEX_THREAD_ID", "CURSOR_AGENT", "TRAILSTONE_AGENT"].some((k) => process.env[k]);
 const renderGoal = (rows) => {
   const g = goal(rows);
   if (!g) return "";
   const t = g.decision.length > 300 ? g.decision.slice(0, 299) + "…" : g.decision; // byte budget
-  return `Goal: ${t}\n  If this request departs from the goal, say so and ask before building; a user-authorized change is a new goal (\`goal "<new>"\`), never a silent drift.`;
+  const pend = proposedGoals(rows).filter((x) => rows.indexOf(x) > rows.indexOf(g));
+  return `Goal: ${t}\n  If this request departs from the goal, say so and ask before building. A change the user clearly authorizes is proposed as a new goal (\`goal "<new>" --proposed\`) for the user to ratify — never a silent drift, and never assumed from an ambiguous reply.` +
+    (pend.length ? `\n  Proposed goal change, NOT in force until the user runs \`trailstone ratify ${pend.at(-1).id}\`: ${pend.at(-1).decision.slice(0, 300)}` : "");
 };
 export const governing = (rows, file) => inForce(rows).filter((d) => scopeHits(d.scope, file));
 
@@ -1087,15 +1096,17 @@ async function main(argv) {
       mkdirSync(join(r, ".trailstone"), { recursive: true });
       if (!existsSync(join(r, LEDGER))) writeFileSync(join(r, LEDGER), HEADER);
       ensureMergeUnion(r);
-      if (f.goal) append(r, { kind: "goal", id: newId("g"), at: new Date().toISOString(), by: who(r), decision: String(f.goal) });
+      if (f.goal) append(r, { kind: "goal", id: newId("g"), at: new Date().toISOString(), by: who(r), decision: String(f.goal), ...(f.proposed || agentShell() ? { status: "proposed" } : {}) });
       console.log(`${LEDGER} ready — commit it. Decisions: \`decide "..." --why "..." --scope src/x.ts,src/y/\`${f.goal ? "" : `; set the goal: \`goal "<what this project is>"\``}`);
       console.log(`This ledger is committed and as public as the repo. A sensitive choice (secret, customer data, pricing, an unannounced plan) → \`decide "..." --private\`: it goes to .trailstone/private.yml, gitignored and never pushed, and still works locally.`); return;
     }
     case "goal": {
       const rows = need(r); const text = pos.join(" ");
-      if (!text) { const g = goal(rows); console.log(g ? `${g.id}  ${g.decision}` : "no goal set — goal \"<what this project is>\""); return; }
-      const row = append(r, { kind: "goal", id: newId("g"), at: new Date().toISOString(), by: who(r), decision: text });
-      console.log(`${row.id} goal set. It is shown to the agent every session and prompt.`); return;
+      if (!text) { const g = goal(rows), pg = proposedGoals(rows); console.log((g ? `${g.id}  ${g.decision}` : "no goal set — goal \"<what this project is>\"") + pg.map((x) => `\nproposed ${x.id}  ${x.decision}  (ratify ${x.id} / reject ${x.id})`).join("")); return; }
+      const pr = !!f.proposed || agentShell();
+      const row = append(r, { kind: "goal", id: newId("g"), at: new Date().toISOString(), by: who(r), decision: text, ...(pr ? { status: "proposed" } : {}) });
+      console.log(pr ? `${row.id} goal PROPOSED — not in force until a person runs \`trailstone ratify ${row.id}\`${f.proposed ? "" : " (set from an AI agent's shell, so it is only a proposal)"}. Until then the current goal stays.`
+        : `${row.id} goal set. It is shown to the agent every session and prompt.`); return;
     }
     case "decide": case "reverse": {
       const rows = need(r);
@@ -1829,6 +1840,16 @@ function selfcheck() {
   append(dir, { kind: "goal", id: "g_2", at: "2021-01-02T00:00:00Z", by: "t", decision: "x".repeat(400) });
   ok(goal(load(dir)).id === "g_2" && renderGoal(load(dir)).startsWith("Goal: xxx") && renderGoal(load(dir)).split("\n")[0].length < 320, "last goal wins, rendered first, truncated");
   ok(inForce(load(dir)).length === 1, "a goal row is not a decision");
+  { // A goal set from an agent's shell is only proposed; a person's terminal sets it; ratify promotes it.
+    const human = { ...process.env }; for (const k of ["CLAUDECODE", "CODEX_SANDBOX", "CODEX_THREAD_ID", "CURSOR_AGENT", "TRAILSTONE_AGENT"]) delete human[k];
+    const cli = (env, ...a) => spawnSync(process.execPath, [SELF, ...a], { cwd: dir, encoding: "utf8", env }).stdout;
+    const out = cli({ ...human, TRAILSTONE_AGENT: "1" }, "goal", "a web app with dashboards");
+    const pid = (out.match(/\b(g_[0-9a-f]{8}) goal PROPOSED/) || [])[1];
+    ok(pid && goal(load(dir)).id === "g_2" && renderGoal(load(dir)).includes(`ratify ${pid}`), `an agent-set goal is proposed, the current goal stays, and the pending change is shown (got: ${out.trim()})`);
+    cli(human, "ratify", pid);
+    ok(goal(load(dir)).id === pid, "ratify makes a proposed goal the goal");
+    ok(/goal set\./.test(cli(human, "goal", "a CLI-first API: no web UI")), "a person's terminal sets the goal directly");
+  }
   ok(staleRelevant("src/auth/session.ts", [], "add a POST /logout endpoint in src/auth") && !staleRelevant("src/auth/session.ts", [], "fix the typo in src/ui/banner.ts") && staleRelevant("src/auth/session.ts", ["src/auth/session.ts"], "anything"), "prompt push is relevance-gated");
   ok(relevant(load(dir), { q: "how do sessions handle cookies here" }).decisions[0]?.id === "d_new", "lexical relevance");
   // Ledger scale (write-time-30): exact file → deeper dir → newer broad rule → older broad rule, and the cut is named.

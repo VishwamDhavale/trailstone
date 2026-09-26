@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Changed — an agent can only propose a new goal.** The goal is shown to the agent every session and
+prompt, and the injection told it how to set a new one. Given an ambiguous "Nice." after it had asked
+the user to choose, an agent rewrote the goal itself. Now `goal` (and `init --goal`) run from an AI
+agent's shell — Claude Code, Codex, Cursor, or `TRAILSTONE_AGENT=1` — records a *proposed* goal; the
+current goal stays in force, the pending change is shown as unconfirmed, and it takes effect when a
+person runs `trailstone ratify <id>`. `--proposed` does the same from any shell.
+
 **Fixed — four ways the ledger could quietly get worse**, found by testing in-session, cross-session
 and cross-developer drift:
 - **A narrower `reverse` dropped the rule everywhere else.** Reversing "money is integer cents" with a
