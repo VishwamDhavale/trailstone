@@ -1883,7 +1883,7 @@ function selfcheck() {
       const sx = `x-${what.replace(/ /g, "")}-${Date.now()}`;
       const hx = (input) => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env, input: JSON.stringify({ cwd, session_id: sx, ...input }) }).stdout;
       const ex = hx({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: join(d5, "src", "a.ts") } });
-      ok(/timestamps are/.test(ex) && ex.includes(join(d5, "src", "a.ts")), `edit hook follows the file's repo, not the session's (${what}), and names it by full path`);
+      ok(/timestamps are/.test(ex) && ex.includes(join(d5, "src", "a.ts")), `edit hook follows the file's repo, not the session's (${what}), and names it by full path (got: ${JSON.stringify(ex.slice(0, 400))}; root of cwd: ${root(cwd)}; root of file: ${root(join(d5, "src"))})`);
       const id = `d_x${sx}`;
       append(d5, { id, at: new Date().toISOString(), by: "t", decision: `timestamps are seconds (${what})`, scope: ["src/"], supersedes: prevId }); prevId = id;
       let sx1 = {}; try { sx1 = JSON.parse(hx({ hook_event_name: "Stop" })); } catch {}
