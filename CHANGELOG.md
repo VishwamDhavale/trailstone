@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.5
 
 **Changed — an agent can only propose a new goal.** The goal is shown to the agent every session and
 prompt, and the injection told it how to set a new one. Given an ambiguous "Nice." after it had asked
