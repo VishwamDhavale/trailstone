@@ -30,5 +30,5 @@ line ""
 type_ "git push              ${G}# the pre-push hook runs trailstone stale${R}"
 grep -q 'the push is blocked' <<<"$OUT" && line "$Y⚠ $n files still rest on the reversed decision → push blocked$R" 1
 line ""
-line "${G}A CLAUDE.md edited mid-work reached 0 of 9 running agents (measured).${R}" 0.2
+line "${G}Pushed by a teammate: CLAUDE.md reached 0/3 unpulled clones, trailstone 3/3.${R}" 0.2
 sleep 4

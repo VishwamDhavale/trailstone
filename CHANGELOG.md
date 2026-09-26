@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**Corrected — what a CLAUDE.md can and cannot do.** The README and VISION said an agent reads
+CLAUDE.md once, at session start, so editing it mid-work reached 0 of 9 running agents. That was
+measured with headless `claude -p` sessions. Recorded in the interactive Claude Code app, an agent
+*did* notice a CLAUDE.md edited in its own checkout (4 of 4). The claim now says so, and says where a
+CLAUDE.md genuinely cannot reach: an agent in another worktree, or a clone that has not pulled.
+
 **Changed — the demo shows the case trailstone is for.** `npx trailstone demo` now runs three agent
 sessions through the real hooks: each is told the rule before its first edit, you reverse it, and each
 running agent's next edit says `was → now`. The README opens with that, and says exactly what `install`

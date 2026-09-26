@@ -1355,7 +1355,7 @@ function demo(keep) {
     console.log("\nThe three agents are still running. At each one's NEXT edit:");
     files.forEach((f, i) => { const m = edit(i).match(/: was "(.+?)" → now "(.+?)"/); console.log(`  agent ${i + 1} → ${f}: ⚠ changed while you worked — was "${m ? m[1] : "?"}" → now "${m ? m[2] : "?"}"`); });
     for (let i = 0; i < files.length; i++) for (const tag of ["edit", "seen"]) rmSync(sessFile(sid(i), tag), { force: true });
-    console.log("A CLAUDE.md edited now would reach none of them: a running agent reads it once, at session start.");
+    console.log("Agents in other worktrees or clones get this too: trailstone reads the ledger on main and on origin, which their own CLAUDE.md copies never see.");
     say("stale        # this is your pre-push hook");
     console.log(renderStale(guard(dir)) + "\n→ exit 1: the push is blocked.");
     console.log("\nsrc/ui/banner.ts was never governed, so it was never flagged. Once the auth files are re-checked, say so:");

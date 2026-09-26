@@ -57,11 +57,12 @@ We measured this against the free default, and the answer is not "better memory"
 - **Delivering rules that don't change: a CLAUDE.md is enough.** Up to 100 rules, agents
   honored a plain CLAUDE.md about as well as Trailstone's surfacing, and it costs less. If your
   decisions are written down and stay put, you do not need this tool.
-- **A decision reversed while agents are working: only Trailstone reaches them.** A running
-  agent reads CLAUDE.md once, at session start. Change it mid-work and 0 of 9 running agents
-  noticed — identical to not changing it. Trailstone's edit hook and `Stop` drift check reached
-  15 of 15, in one shared checkout and with one worktree per agent, and a reversal pushed from
-  another clone reached 9 of 9.
+- **A decision reversed where the agent is not looking: only Trailstone reaches it.** In one
+  shared checkout, the interactive Claude Code app notices an edited CLAUDE.md (4 of 4 in our
+  runs; headless sessions did not). But a change committed on `main` never alters the CLAUDE.md
+  an agent in another worktree reads, and a teammate's pushed decision never reaches a clone that
+  has not pulled (CLAUDE.md 0 of 3, Trailstone 3 of 3). Trailstone reads the ledger on `main` and
+  on `origin`, so it reached every agent in those setups (worktrees 15 of 15, clones 9 of 9).
 
 So that is the pitch: not a smarter place to write rules down, but the thing that makes
 *changing* a rule safe once work is under way — for the agents already running and for the

@@ -2,7 +2,7 @@
 
 **You changed your mind. Your agents didn't.**
 
-When a decision changes while AI agents are already working — yours in parallel sessions, or a
+When a decision changes while AI agents are already working — yours in other worktrees, or a
 teammate's in their own clone — trailstone gets the new rule to each of them at their next edit, and
 blocks the push of any file still built on the old one. One script and one file in your repo. No
 server, no account, no telemetry.
@@ -31,11 +31,13 @@ $ git push
 ```
 
 **Why not just a CLAUDE.md?** We measured it. For rules that stay put, a CLAUDE.md holds as well as
-trailstone — within a session, across sessions, against a drifting goal. The difference is a rule
-that *moves after the agent started*: a running agent reads CLAUDE.md once, so editing it reached
-**0 of 9** agents already working (trailstone: 15 of 15, in one checkout and in per-agent worktrees),
-and a teammate's pushed decision reached **0 of 3** clones that hadn't pulled (trailstone: 3 of 3,
-via a fetch of origin's default branch).
+trailstone — within a session, across sessions, against a drifting goal. And in the interactive
+Claude Code app, an agent notices a CLAUDE.md edited *in its own checkout* mid-work (4 of 4 in our
+runs; headless `claude -p` sessions did not, 0 of 9). What a CLAUDE.md cannot do is reach an agent
+whose checkout never sees the edit: a teammate's pushed decision reached **0 of 3** clones that
+hadn't pulled (trailstone: 3 of 3, via a fetch of origin's default branch), and a change committed
+on `main` never alters the copy an agent in another worktree is reading (trailstone reads `main`'s
+ledger too). That is where it earns its place: the rule moved somewhere the agent is not looking.
 
 ## What it does and doesn't catch (read this before judging it)
 
