@@ -623,10 +623,10 @@ function repoOfFile(p) {
 }
 
 function editHook(input) {
-  const cwd = input.cwd || process.cwd(), home = root(cwd), byRepo = new Map();
+  const cwd = input.cwd || process.cwd(), home = root(cwd), byRepo = new Map(), asGiven = new Map();
   for (const p0 of editPaths(input)) {
     const p = isAbsolute(p0) ? p0 : join(cwd, p0), r = repoOfFile(p), f = r && repoRel(r, p);
-    if (f && !f.startsWith("..")) byRepo.set(r, [...new Set([...(byRepo.get(r) || []), f])]);
+    if (f && !f.startsWith("..")) { byRepo.set(r, [...new Set([...(byRepo.get(r) || []), f])]); asGiven.set(`${r}\u0000${f}`, p); }
   }
   // Once per (session, file, rule set) — not once per (session, file): a decision reversed while
   // this agent works must reach its NEXT edit of a file it already touched. Once-per-file left an
@@ -642,7 +642,7 @@ function editHook(input) {
     }
     const st = stale(r, rows);
     for (const f of files) {
-      const key = `${r}\u0000${f}`, sig = govSig(rows, f), label = r === home ? f : join(r, f);
+      const key = `${r}\u0000${f}`, sig = govSig(rows, f), label = r === home ? f : asGiven.get(key); // the agent's own path for it
       if (seen[key] === sig) continue;
       const drift = key in seen ? renderDrift(rows, f, seen[key], label) : [];
       delete seen[key]; seen[key] = sig; // re-insert: the most recent entries survive the cap below
@@ -1887,7 +1887,8 @@ function selfcheck() {
       const id = `d_x${sx}`;
       append(d5, { id, at: new Date().toISOString(), by: "t", decision: `timestamps are seconds (${what})`, scope: ["src/"], supersedes: prevId }); prevId = id;
       let sx1 = {}; try { sx1 = JSON.parse(hx({ hook_event_name: "Stop" })); } catch {}
-      ok(sx1.decision === "block" && sx1.reason.includes(join(d5, "src", "a.ts")), `Stop drift check covers files edited in another repo (${what})`);
+      // git's root and tmpdir() can spell the same folder differently (Windows 8.3 names): match the repo folder + file.
+      ok(sx1.decision === "block" && sx1.reason.includes(basename(d5)) && /a\.ts/.test(sx1.reason), `Stop drift check covers files edited in another repo (${what})`);
     }
     rmSync(other, { recursive: true, force: true }); rmSync(bare, { recursive: true, force: true });
     rmSync(d5, { recursive: true, force: true });
