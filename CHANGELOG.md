@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+**Fixed — four ways the ledger could quietly get worse**, found by testing in-session, cross-session
+and cross-developer drift:
+- **A narrower `reverse` dropped the rule everywhere else.** Reversing "money is integer cents" with a
+  one-file scope to allow an exception left every other route governed by no version of the rule.
+  `reverse` (CLI and MCP) now names the files it stops governing and how to keep the rule there.
+- **The capture ask recorded drift beside the rule it broke.** When a turn followed the user away from
+  an earlier decision or proposal, the agent recorded a second, contradicting row. The ask now lists
+  the decisions *and proposals* that cover the work — including ones about the same rule scoped to
+  another file — and says to `reverse` one instead of adding beside it.
+- **The capture ask scoped general rules to the files one turn touched.** "Never offset/limit" was
+  recorded for one file and later cited as the reason to page another by offset. The ask now asks for
+  every path the rule governs.
+- **The drift check told an agent about its own reversal.** It now stays quiet when every change to a
+  file's rules is one the same session recorded — but still speaks when that change dropped the file
+  from a rule, which is how a too-narrow reversal gets caught.
+
 **Fixed — `install` left existing hooks on an old path.** Re-running it kept any trailstone hook entry
 it found in `~/.claude/settings.json` / `~/.codex/hooks.json` as it was, so after moving between a
 local checkout and an npm install (or to a new node version) the hooks kept pointing at the old

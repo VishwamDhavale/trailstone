@@ -341,6 +341,17 @@ const renderGoal = (rows) => {
 };
 export const governing = (rows, file) => inForce(rows).filter((d) => scopeHits(d.scope, file));
 
+// A reversal with a narrower scope than the decision it replaces leaves the old rule governing
+// nothing in the difference: "money is integer cents" reversed for one file stopped applying to every
+// other route (drift-scenarios S1). Exact scope arithmetic, same as the gate — never a guess.
+function droppedBy(r, old, row) {
+  if (!old?.scope?.length) return [];
+  return trackedFiles(r).filter((f) => scopeHits(old.scope, f) && !scopeHits(row.scope || [], f));
+}
+const narrowedNote = (old, dropped) =>
+  `⚠ narrower than the decision it replaces: ${dropped.length} file${dropped.length === 1 ? "" : "s"} "${old.decision}" governed ${dropped.length === 1 ? "is" : "are"} now governed by no version of it (${dropped.slice(0, 3).join(", ")}${dropped.length > 3 ? ", …" : ""}).\n` +
+  `  If the old rule should still hold there, reverse again with the old scope (${old.scope.join(", ")}) and write the exception into the decision text.`;
+
 // Resolve a decision reference to an id: an exact id, or a unique case-insensitive substring of
 // the decision text among `candidates`. Never guesses — 0 or >1 matches is an error, because a
 // wrong reverse would flag the wrong files. Lets a human name a decision by a phrase, not a hash.
@@ -599,8 +610,8 @@ async function hook() {
     let turn = null; try { turn = lastTurn(input.transcript_path); } catch {}
     const touched = (turn?.files || []).map(rel).filter((f) => f && !f.startsWith(".."));
     if (!touched.length) process.exit(0);
-    const gov = [...new Map(touched.flatMap((f) => governing(rows, f)).map((d) => [d.id, d])).values()];
-    process.stdout.write(JSON.stringify({ decision: "block", reason: inbandAsk(touched, gov), systemMessage: INBAND_NOTE }));
+    const { gov, props } = askContext(rows, touched, turn);
+    process.stdout.write(JSON.stringify({ decision: "block", reason: inbandAsk(touched, gov, props), systemMessage: INBAND_NOTE }));
     process.exit(0);
   }
   if (event === "Stop") {
@@ -665,23 +676,48 @@ function editHook(input) {
 // committed after the reversal (so `stale` reads it as addressed). The agent that wrote it is
 // still here — ask it before the turn ends. Once: the continuation carries stop_hook_active.
 // Every repo the session edited is checked, not only the one it was opened in.
+// Decision ids this session recorded itself: `decide`/`reverse` print "<id> recorded", the MCP tools
+// "Recorded <id>". Read from the transcript, since a ledger row does not know its session.
+function ownIds(transcriptPath) {
+  let t = ""; try { t = readFileSync(transcriptPath, "utf8"); } catch { return new Set(); }
+  return new Set([...t.matchAll(/\b(d_[0-9a-f]{8}) recorded|Recorded (d_[0-9a-f]{8})/g)].map((m) => m[1] || m[2]));
+}
+// A rule change the agent made itself is not news to it: every decision newly governing the file is
+// its own, and every one that stopped governing was superseded by one of those. Told anyway, it
+// re-checked its own reversal twice in one run (drift-scenarios S1). A change that DROPPED a file from
+// a rule (its own too-narrow reversal) still fires — that one caught a real mistake in the same run.
+function ownChange(rows, was, now, own) {
+  const P = new Set(was.split(",").filter(Boolean)), N = new Set(now.split(",").filter(Boolean));
+  const added = [...N].filter((id) => !P.has(id)), removed = [...P].filter((id) => !N.has(id));
+  if (!added.every((id) => own.has(id))) return false;
+  return removed.every((id) => {
+    let cur = id, next;
+    for (let i = 0; i < 50 && (next = rows.find((x) => x.supersedes === cur && (x.kind ?? "decision") === "decision" && !x.status)); i++) cur = next.id;
+    return cur !== id && N.has(cur) && own.has(cur);
+  });
+}
 function driftCheck(input) {
-  const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), rowsOf = new Map(), moved = [];
+  const kf = sessFile(input.session_id, "seen"), seen = readJson(kf, {}), rowsOf = new Map(), moved = [], quiet = {};
+  const own = input.transcript_path ? ownIds(input.transcript_path) : new Set();
   for (const [k, s] of Object.entries(seen)) {
     const i = k.indexOf("\u0000"), r = k.slice(0, i), f = k.slice(i + 1);
     if (!rowsOf.has(r)) { refreshDefault(r, true); rowsOf.set(r, load(r)); }
-    const rows = rowsOf.get(r);
-    if (rows && govSig(rows, f) !== s) moved.push({ k, r, f, s, rows });
+    const rows = rowsOf.get(r), now = rows && govSig(rows, f);
+    if (!rows || now === s) continue;
+    if (ownChange(rows, s, now, own)) quiet[k] = now; // its own change: remember the new rules, say nothing
+    else moved.push({ k, r, f, s, rows });
   }
+  if (Object.keys(quiet).length) try { writeFileSync(kf, JSON.stringify({ ...seen, ...quiet })); } catch {}
   if (!moved.length) return;
+  Object.assign(seen, quiet);
   const home = root(input.cwd || process.cwd());
   const lines = moved.flatMap((m) => renderDrift(m.rows, m.f, m.s, m.r === home ? m.f : join(m.r, m.f)));
   try { writeFileSync(kf, JSON.stringify({ ...seen, ...Object.fromEntries(moved.map((m) => [m.k, govSig(m.rows, m.f)])) })); } catch {}
   let also = "";
   const rows = home && (rowsOf.get(home) ?? load(home));
   if (rows && captureMode() === "inband" && input.transcript_path) try {
-    const t = (lastTurn(input.transcript_path)?.files || []).map((p) => repoRel(home, p)).filter((f) => f && !f.startsWith(".."));
-    if (t.length) also = "\n\nThen, separately: " + inbandAsk(t, [...new Map(t.flatMap((f) => governing(rows, f)).map((d) => [d.id, d])).values()]);
+    const turn = lastTurn(input.transcript_path), t = (turn?.files || []).map((p) => repoRel(home, p)).filter((f) => f && !f.startsWith(".."));
+    if (t.length) { const { gov, props } = askContext(rows, t, turn); also = "\n\nThen, separately: " + inbandAsk(t, gov, props); }
   } catch {}
   process.stdout.write(JSON.stringify({ decision: "block", reason: DRIFT_HEAD + lines.join("\n") + "\nRe-check each file against the new decision and fix what still follows the old one, then say what you changed." + also, systemMessage: DRIFT_NOTE }));
   process.exit(0);
@@ -776,12 +812,28 @@ ${assistant}`;
 // Shown to the USER beside Claude Code's "Stop hook error occurred" label: this is not an error.
 const INBAND_NOTE = "Trailstone: not an error — asking the agent to record this turn's decisions (TRAILSTONE_CAPTURE=0 turns this off)";
 // The in-band ask: the judge's rules, compressed, addressed to the agent that did the work.
-export const inbandAsk = (touched, gov) =>
+// Scope is what the rule GOVERNS, not what the turn touched: "never offset/limit" recorded as
+// invoices-only was later cited as the reason to page customers by offset (drift-scenarios S2).
+// And a choice that contradicts an existing decision OR proposal is a reversal, not a new row:
+// a second row beside the first left two contradicting proposals, neither superseding (same eval).
+export const inbandAsk = (touched, gov, props = []) =>
   `Trailstone, before you finish: did this turn COMMIT to a choice that rules out an alternative — one you made, or one the user stated and you acted on? ` +
   `Only a commitment that later work rests on counts ("retries live in the client, not the server"). NOT: what you built or fixed, a tunable value, an observation, a deferral.\n` +
-  `For each, run: node "${SELF}" decide "<X, not Y>" --why "<why>" --scope <comma-separated files it GOVERNS, from: ${touched.join(", ")}> --proposed\n` +
-  (gov.length ? `Decisions in force on these files — if this turn departed from one, run: node "${SELF}" reverse <id> "<what it is now>" --proposed\n${gov.map((d) => `  [${d.id}] ${d.decision}`).join("\n")}\n` : "") +
+  (gov.length || props.length ? `These already cover this work — if a choice this turn contradicts one, do NOT record a second decision beside it: run node "${SELF}" reverse <id> "<what it is now>" --proposed, so the new rule supersedes the old one:\n` +
+    [...gov.map((d) => `  [${d.id}] ${d.decision}`), ...props.map((d) => `  [${d.id}] (proposed) ${d.decision}`)].join("\n") + "\n" : "") +
+  `For a NEW choice, run: node "${SELF}" decide "<X, not Y>" --why "<why>" --scope <every path the rule GOVERNS — a directory or glob when the rule is general, not only the files this turn touched (${touched.join(", ")})> --proposed\n` +
   `If there is nothing, record nothing. Either way, finish with one line: "Recorded: <ids>" or "No decision to record." Do not redo or extend the work.`;
+// What the ask should list: decisions in force governing the touched files or named by the turn's
+// words, and proposals scoped to those files or named by them — a proposal scoped elsewhere
+// ("invoices use cursors") still covers a turn about the same rule ("customers use page/limit").
+export function askContext(rows, touched, turn) {
+  const q = `${turn?.userAsk || ""} ${turn?.assistant || ""}`;
+  const gov = relevant(rows, { files: touched, q, cap: 10 }).decisions;
+  const words = new Set((q.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []));
+  const props = proposed(rows).filter((p) => touched.some((f) => scopeHits(p.scope, f)) ||
+    new Set((p.decision.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []).filter((w) => words.has(w))).size >= 2).slice(0, 5);
+  return { gov, props };
+}
 
 // transcript → the last turn: the user's ask, everything the assistant SAID (tool calls
 // are noise), and every file it wrote (each Edit/Write/NotebookEdit carries its path).
@@ -1093,6 +1145,8 @@ async function main(argv) {
         else if (n > 15) console.log(`⚠ that is a lot of files — narrow the scope if the decision does not really govern all ${n}.`);
       } else console.log(`no scope — this decision governs nothing and a reversal will flag no files. Add --scope <paths> to make it enforceable.`);
       if (supersedes) { const st = stale(r).filter((s) => s.replacedById === row.id); if (st.length) console.log(`now stale (${st.length}):\n` + st.map((s) => `  ${s.file}`).join("\n")); }
+      const dropped = old ? droppedBy(r, old, row) : [];
+      if (dropped.length) console.log(narrowedNote(old, dropped));
       return;
     }
     case "validate": {
@@ -1476,8 +1530,8 @@ function mcp(f = {}) {
         const old = all.find((x) => x.id === res.id);
         const scope = (Array.isArray(a.scope) && a.scope.length) ? a.scope : (old.scope || []);
         const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision, why: a.why || "", scope, supersedes: res.id }, !!old._private || !!a.private);
-        const st = stale(r).filter((s) => s.replacedById === row.id);
-        return `Recorded ${row.id} (supersedes ${res.id}).` + (st.length ? `\nNow stale — re-check these before building on them:\n` + st.map((s) => `  ${s.file}`).join("\n") : "\nNothing became stale.");
+        const st = stale(r).filter((s) => s.replacedById === row.id), dropped = droppedBy(r, old, row);
+        return `Recorded ${row.id} (supersedes ${res.id}).` + (st.length ? `\nNow stale — re-check these before building on them:\n` + st.map((s) => `  ${s.file}`).join("\n") : "\nNothing became stale.") + (dropped.length ? "\n" + narrowedNote(old, dropped) : "");
       }
       case "validate": {
         if (!a.decision_ref || !a.file) return "decision_ref and file are required.";
@@ -1782,6 +1836,14 @@ function selfcheck() {
   const big = [R("b_old", "2024-01-01", ["docs/"]), R("b_new", "2025-01-01", ["docs/"]), R("c_dir", "2023-01-01", ["docs/cookbooks/"]), R("x_file", "2022-01-01", ["docs/cookbooks/a.mdx"]), R("o", "2025-06-01", ["src/"])];
   const rk = relevant(big, { files: ["docs/cookbooks/a.mdx"], cap: 3 });
   ok(rk.decisions.map((d) => d.id).join() === "x_file,c_dir,b_new" && rk.more === 1 && renderRelevant(rk, "h", "governing docs/cookbooks/a.mdx").includes("1 more in force here"), "relevance ranks specific-then-newest and names what the cap cut");
+  { // The capture ask (drift-scenarios S2): a proposal scoped to another file but about the same rule is
+    // listed, the agent is told to reverse rather than add, and scope means what the rule governs.
+    const pr = [{ id: "d_cur", at: "2025-01-01", decision: "GET /invoices paginates with an opaque cursor, not offset/limit", scope: ["src/routes/invoices.js"], status: "proposed" }];
+    const turn = { userAsk: "Add pagination to GET /customers — page and limit are fine", assistant: "Used page/limit; GET /invoices uses cursor pagination." };
+    const { gov, props } = askContext(pr, ["src/routes/customers.js"], turn), ask = inbandAsk(["src/routes/customers.js"], gov, props);
+    ok(props.map((x) => x.id).join() === "d_cur" && /\(proposed\) GET \/invoices/.test(ask) && /do NOT record a second decision/.test(ask), "capture ask lists a same-rule proposal from another file and says reverse, not add");
+    ok(/every path the rule GOVERNS/.test(ask) && !/GOVERNS, from:/.test(ask), "capture ask scopes a rule by what it governs, not only the files touched");
+  }
   writeFileSync(join(dir, "src", "auth", "jwt.ts"), "dirty"); ok(stale(dir).length === 0, "working-tree edit clears");
   g("checkout", "--", "src/auth/jwt.ts"); ok(stale(dir).length === 1, "revert restores the flag");
   append(dir, { kind: "validation", id: "v_1", at: "2022-01-01T00:00:00Z", by: "t", decisionId: "d_old", scope: ["src/auth/jwt.ts"] });
@@ -1897,6 +1959,21 @@ function selfcheck() {
       ok(sx1.decision === "block" && sx1.reason.includes(basename(d5)) && /a\.ts/.test(sx1.reason), `Stop drift check covers files edited in another repo (${what})`);
     }
     rmSync(other, { recursive: true, force: true }); rmSync(bare, { recursive: true, force: true });
+    { // The agent's own reversal is not news to it; someone else's is (drift-scenarios S1).
+      const so = `own-${Date.now()}`, tp = join(d5, "t.jsonl");
+      const ho = (input) => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env, input: JSON.stringify({ cwd: d5, session_id: so, transcript_path: tp, ...input }) }).stdout;
+      ho({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: join(d5, "src", "a.ts") } });
+      append(d5, { id: "d_0aa00001", at: new Date().toISOString(), by: "t", decision: "timestamps are minutes", scope: ["src/"], supersedes: prevId });
+      writeFileSync(tp, JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: "d_0aa00001 recorded (supersedes x)." }] } }) + "\n");
+      let q = {}; try { q = JSON.parse(ho({ hook_event_name: "Stop" })); } catch {}
+      ok(!q.decision, `Stop stays quiet about a reversal the same session recorded (got: ${JSON.stringify(q).slice(0, 160)})`);
+      append(d5, { id: "d_0bb00001", at: new Date().toISOString(), by: "t", decision: "timestamps are hours", scope: ["src/"], supersedes: "d_0aa00001" });
+      let q2 = {}; try { q2 = JSON.parse(ho({ hook_event_name: "Stop" })); } catch {}
+      ok(q2.decision === "block" && /timestamps are hours/.test(q2.reason), "…and still asks about a reversal someone else recorded");
+      // A narrower reversal says which files it stops governing.
+      const nr = spawnSync(process.execPath, [SELF, "reverse", "d_0bb00001", "timestamps are days", "--scope", "src/a.ts"], { cwd: d5, encoding: "utf8", env }).stdout;
+      ok(/narrower than the decision it replaces: 1 file/.test(nr) && /src\/b\.ts/.test(nr), `reverse warns when its narrower scope stops governing files (got: ${nr.slice(-240)})`);
+    }
     rmSync(d5, { recursive: true, force: true });
   }
   { // A repo reached through a symlink (macOS /var → /private/var): git reports the real root, the harness
