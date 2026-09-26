@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.3.3
+## 0.3.4
+
+Everything in 0.3.3, which was tagged but never published: its new cross-repo selfcheck failed on
+Windows, where git and the temp directory spell the same folder differently. A warning about a file
+outside the session's repo now names it by the path the agent used.
+
+## 0.3.3 (tagged, not published)
 
 **Fixed — `install` on a repo it had already set up.** It reported its own pre-push hook as someone
 else's and told you to add the line that hook already runs; it now recognises the hook it wrote,
