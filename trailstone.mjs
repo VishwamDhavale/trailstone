@@ -1659,9 +1659,14 @@ const HOOK_EVENTS = { claude: "Edit|Write|MultiEdit|NotebookEdit", codex: "apply
 const ours = (h) => (h.command || "").includes(basename(SELF));
 function wireHooks(file, editMatcher) { // idempotent: adds OUR entry per event, keeps everyone else's
   const s = readJson(file, {}); s.hooks = s.hooks || {};
+  const cmd = `"${NODE_ABS}" "${SELF_CMD}" hook`;
   for (const [ev, matcher] of [["SessionStart"], ["UserPromptSubmit"], ["PreToolUse", editMatcher], ["Stop"]]) {
     s.hooks[ev] = s.hooks[ev] || [];
-    if (!s.hooks[ev].some((g) => (g.hooks || []).some(ours))) s.hooks[ev].push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `"${NODE_ABS}" "${SELF_CMD}" hook` }] });
+    // An entry of ours is refreshed, not kept: node and the script move (an npm install vs a checkout,
+    // a new node version), and a hook left pointing at the old path fails open — silent, forever.
+    const mine = s.hooks[ev].flatMap((g) => (g.hooks || []).filter(ours));
+    if (mine.length) mine.forEach((h) => { h.command = cmd; });
+    else s.hooks[ev].push({ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: cmd }] });
   }
   mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify(s, null, 2));
 }
@@ -1998,6 +2003,14 @@ function selfcheck() {
     ok(cmds.every((c) => /^"[^"]+" "[^"]+" hook$/.test(c)), `hook commands quote both the node binary and the script path (got: ${cmds[0]})`);
     ok(cmds.every((c) => isAbsolute(c.split('" "')[0].replace(/^"/, ""))), `the node binary is an absolute path, not bare "node" (got: ${cmds[0]})`);
     ok(cmds.every((c) => !c.includes("\\")), "hook commands contain no backslashes (git-bash on Windows)");
+    { // Re-install after the script moved: our entries are repointed, not left on the old path.
+      const moved = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+      for (const g of Object.values(moved.hooks).flat()) for (const h of g.hooks) h.command = `"/old/node" "/old/place/${basename(SELF)}" hook`;
+      writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify(moved));
+      spawnSync(process.execPath, [SELF, "install", "--no-rules"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } });
+      const after = Object.values(JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8")).hooks).flat().flatMap((g) => g.hooks).map((h) => h.command);
+      ok(after.length === 4 && after.every((c) => c === cmds[0]), `re-install repoints our hooks to the current script, without duplicating them (got: ${after.join(" | ")})`);
+    }
     const pp = readFileSync(join(dir, ".git", "hooks", "pre-push"), "utf8");
     ok(/^exec "[^"]+" "[^"]+" stale$/m.test(pp) && !pp.includes("\\"), "pre-push quotes both paths, absolute node, forward slashes");
     ok(/\.gitignore \+= /.test(res.stdout), "install says it added the private ledger to .gitignore");

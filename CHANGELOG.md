@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Fixed — `install` left existing hooks on an old path.** Re-running it kept any trailstone hook entry
+it found in `~/.claude/settings.json` / `~/.codex/hooks.json` as it was, so after moving between a
+local checkout and an npm install (or to a new node version) the hooks kept pointing at the old
+location — and a hook whose script is gone fails open, silently. `install` now repoints its own
+entries to the current node and script, still without duplicating them or touching anyone else's.
+
 ## 0.3.4
 
 Everything in 0.3.3, which was tagged but never published: its new cross-repo selfcheck failed on
