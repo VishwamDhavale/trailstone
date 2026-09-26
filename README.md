@@ -11,6 +11,8 @@ server, no account, no telemetry.
 npx trailstone demo     # three agents, one reversal, ten seconds
 ```
 
+![trailstone demo: three running agents are told the new rule at their next edit, and the push is blocked](https://raw.githubusercontent.com/VishwamDhavale/trailstone/main/docs/demo.gif)
+
 ```
 Three agents start work on auth, each in its own session. Before each first edit, the hook tells it:
   agent 1 → src/auth/session.ts: "Sessions use JWT in an Authorization header, not cookies"
