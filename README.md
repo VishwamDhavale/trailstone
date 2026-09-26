@@ -1,41 +1,39 @@
 # trailstone
 
-**A decision ledger that lives in your repo.** When a decision is reversed, trailstone flags
-every file the decision governed, so it gets re-checked before you build further — in your AI
-agent's context the moment it opens one, and at the push. Most flagged files will still be
-fine; the point is that the one that isn't no longer slips through green.
+**You changed your mind. Your agents didn't.**
+
+When a decision changes while AI agents are already working — yours in parallel sessions, or a
+teammate's in their own clone — trailstone gets the new rule to each of them at their next edit, and
+blocks the push of any file still built on the old one. One script and one file in your repo. No
+server, no account, no telemetry.
 
 ```bash
-npx trailstone demo     # the whole idea, on a throwaway repo, in ten seconds
+npx trailstone demo     # three agents, one reversal, ten seconds
 ```
 
-Real work with an AI is weeks of sessions. Every message steers a little, and what was decided
-three sessions ago quietly stops governing the work. Worse: when a decision is *reversed*,
-everything built on the old one stays finished, green, and wrong.
-
-trailstone is one file in your repo and one script. No server, no account, no telemetry.
-
 ```
-$ trailstone reverse d_6d0bf686 "Sessions use a signed HttpOnly cookie, not a JWT header"
-d_259ab7a1 recorded (supersedes d_6d0bf686).
-now stale (1):
-  src/auth/session.ts
+Three agents start work on auth, each in its own session. Before each first edit, the hook tells it:
+  agent 1 → src/auth/session.ts: "Sessions use JWT in an Authorization header, not cookies"
+  agent 2 → src/auth/login.ts:   "Sessions use JWT in an Authorization header, not cookies"
+
+$ trailstone reverse d_5913723e "Sessions use a signed HttpOnly cookie, not a JWT header"
+now stale (3): src/auth/login.ts  src/auth/logout.ts  src/auth/session.ts
+
+The three agents are still running. At each one's NEXT edit:
+  agent 1 → src/auth/session.ts: ⚠ changed while you worked — was "…JWT…" → now "…signed HttpOnly cookie…"
+  agent 2 → src/auth/login.ts:   ⚠ changed while you worked — was "…JWT…" → now "…signed HttpOnly cookie…"
 
 $ git push
 ⚠️ STALE — these files were last committed BEFORE a decision governing them was reversed.
-  - src/auth/session.ts — was: Sessions use JWT in an Authorization header, not cookies
-                          → now: Sessions use a signed HttpOnly cookie, not a JWT header (Dana, 2026-09-06)
 → exit 1: the push is blocked.
 ```
 
-Your agent sees the same warning *before* it edits the file, with the old text and the new one,
-so it re-checks the work instead of building on ground that moved.
-
-**Why not just a CLAUDE.md?** For rules that stay put, a CLAUDE.md is fine — we measured it
-holding up as well as trailstone. The difference is a decision *changed mid-work*: a running agent
-reads CLAUDE.md once, at session start, so editing it reached 0 of 9 agents already working.
-trailstone reached 15 of 15, in one checkout and in per-agent worktrees, and 9 of 9 across
-separate clones (via a fetch of origin's default branch).
+**Why not just a CLAUDE.md?** We measured it. For rules that stay put, a CLAUDE.md holds as well as
+trailstone — within a session, across sessions, against a drifting goal. The difference is a rule
+that *moves after the agent started*: a running agent reads CLAUDE.md once, so editing it reached
+**0 of 9** agents already working (trailstone: 15 of 15, in one checkout and in per-agent worktrees),
+and a teammate's pushed decision reached **0 of 3** clones that hadn't pulled (trailstone: 3 of 3,
+via a fetch of origin's default branch).
 
 ## What it does and doesn't catch (read this before judging it)
 
@@ -74,6 +72,12 @@ trailstone init --goal "what this project is"
 git add .trailstone AGENTS.md && git commit -m "trailstone: ledger"
 trailstone doctor                   # confirms it is actually watching
 ```
+
+**What `install` touches** — `trailstone uninstall` removes the hooks, the pre-push and the Cursor
+files; the ledger, the `AGENTS.md` block and the `.gitignore` line are yours to delete: four hook entries in `~/.claude/settings.json` (and
+`~/.codex/hooks.json` if you use Codex), this repo's `.git/hooks/pre-push`, a line in `.gitignore`
+for the private ledger, a short block in `AGENTS.md`, and `.cursor/hooks.json` if you use Cursor.
+Nothing else, and nothing leaves your machine.
 
 **Run `install` from inside the repo.** Outside one it can only write the global Claude Code
 hooks — you would get the warnings but *not* the pre-push guard that enforces them. It now

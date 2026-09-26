@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+**Changed — the demo shows the case trailstone is for.** `npx trailstone demo` now runs three agent
+sessions through the real hooks: each is told the rule before its first edit, you reverse it, and each
+running agent's next edit says `was → now`. The README opens with that, and says exactly what `install`
+touches and what `uninstall` removes.
+
 **Changed — capture no longer asks after routine edits.** Claude Code labels every Stop-hook ask "Stop
 hook error occurred", so asking after every editing turn made a typo fix look like a failure. The ask
 now comes only when the turn looks like it chose something: the user stated a rule, the agent said what

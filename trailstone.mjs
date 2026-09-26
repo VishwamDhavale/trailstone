@@ -1327,10 +1327,12 @@ function demo(keep) {
     mkdirSync(join(dir, "src", "ui"), { recursive: true });
     g("init", "-q"); g("config", "user.name", "Dana"); g("config", "user.email", "dana@example.com");
     writeFileSync(join(dir, "src", "auth", "session.ts"), "// A client presents its JWT as `Authorization: Bearer <token>`.\nexport const verify = (h: string) => jwt.verify(h.slice(7), SECRET);\n");
+    writeFileSync(join(dir, "src", "auth", "login.ts"), "// Login returns a JWT for the client to send back in a header.\nexport const login = (u: User) => ({ token: jwt.sign({ sub: u.id }, SECRET) });\n");
+    writeFileSync(join(dir, "src", "auth", "logout.ts"), "// Logout: the client drops its JWT.\nexport const logout = () => ({ ok: true });\n");
     writeFileSync(join(dir, "src", "ui", "banner.ts"), "export const banner = () => \"invoices-api\";\n");
     const t3 = new Date(Date.now() - 3 * 864e5).toISOString();
     g("add", "."); execFileSync("git", ["commit", "-qm", "invoices api"], { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: t3, GIT_COMMITTER_DATE: t3 } });
-    console.log(`A throwaway repo in ${dir}: two files, last committed 3 days ago.`);
+    console.log(`A throwaway repo in ${dir}: four files, last committed 3 days ago.`);
     say('init --goal "A CLI-first invoices API"');
     mkdirSync(join(dir, ".trailstone"), { recursive: true }); writeFileSync(join(dir, LEDGER), HEADER);
     append(dir, { kind: "goal", id: newId("g"), at: t3, by: "Dana", decision: "A CLI-first invoices API" });
@@ -1338,16 +1340,28 @@ function demo(keep) {
     say('decide "Sessions use JWT in an Authorization header, not cookies" --scope src/auth/');
     const d1 = append(dir, { id: newId("d"), at: t3, by: "Dana", decision: "Sessions use JWT in an Authorization header, not cookies", scope: ["src/auth/"] });
     console.log(`${d1.id} recorded. Commit ${LEDGER} to make it bind for everyone.`);
+    // The moment trailstone exists for: agents already running when the decision changes. Driven by
+    // the real hook, one session per agent — what Claude Code, Codex or Cursor would inject.
+    const files = ["src/auth/session.ts", "src/auth/login.ts", "src/auth/logout.ts"], sid = (i) => `demo-${process.pid}-${i}`;
+    const edit = (i) => { const o = spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env: { ...process.env, TRAILSTONE_FETCH: "0", TRAILSTONE_CAPTURE: "0" },
+      input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: dir, session_id: sid(i), tool_name: "Edit", tool_input: { file_path: join(dir, files[i]) } }) }).stdout;
+      try { return JSON.parse(o).hookSpecificOutput.additionalContext; } catch { return ""; } };
+    console.log("\nThree agents start work on auth, each in its own session. Before each first edit, the hook tells it:");
+    files.forEach((f, i) => console.log(`  agent ${i + 1} → ${f}: "${(edit(i).match(/^\s+- (.+?) \[scope/m) || [, "?"])[1]}"`));
     say(`reverse ${d1.id} "Sessions use a signed HttpOnly cookie, not a JWT header" --why "a stolen header token is replayable"`);
     const d2 = append(dir, { id: newId("d"), at: new Date().toISOString(), by: "Dana", decision: "Sessions use a signed HttpOnly cookie, not a JWT header", why: "a stolen header token is replayable", scope: ["src/auth/"], supersedes: d1.id });
     const st = stale(dir);
     console.log(`${d2.id} recorded (supersedes ${d1.id}).\nnow stale (${st.length}):\n` + st.map((x) => `  ${x.file}`).join("\n"));
+    console.log("\nThe three agents are still running. At each one's NEXT edit:");
+    files.forEach((f, i) => { const m = edit(i).match(/: was "(.+?)" → now "(.+?)"/); console.log(`  agent ${i + 1} → ${f}: ⚠ changed while you worked — was "${m ? m[1] : "?"}" → now "${m ? m[2] : "?"}"`); });
+    for (let i = 0; i < files.length; i++) for (const tag of ["edit", "seen"]) rmSync(sessFile(sid(i), tag), { force: true });
+    console.log("A CLAUDE.md edited now would reach none of them: a running agent reads it once, at session start.");
     say("stale        # this is your pre-push hook");
     console.log(renderStale(guard(dir)) + "\n→ exit 1: the push is blocked.");
-    console.log("\nNobody touched src/ui/banner.ts's world, so it was never flagged. Now re-check the file and say it holds:");
-    say(`validate ${d1.id} --scope src/auth/session.ts`);
-    const v = append(dir, { kind: "validation", id: newId("v"), at: new Date().toISOString(), by: "Dana", decisionId: d1.id, scope: ["src/auth/session.ts"] });
-    console.log(`${v.id}: re-checked against ${d1.id} for src/auth/session.ts — holds.`);
+    console.log("\nsrc/ui/banner.ts was never governed, so it was never flagged. Once the auth files are re-checked, say so:");
+    say(`validate ${d1.id} --scope src/auth/`);
+    const v = append(dir, { kind: "validation", id: newId("v"), at: new Date().toISOString(), by: "Dana", decisionId: d1.id, scope: ["src/auth/"] });
+    console.log(`${v.id}: re-checked against ${d1.id} for src/auth/ — holds.`);
     say("stale");
     console.log(stale(dir).length ? renderStale(stale(dir)) : "trailstone: clean.");
     console.log(`\nThat is the whole product. The ledger is one file you commit:\n\n${readFileSync(join(dir, LEDGER), "utf8")}`);
