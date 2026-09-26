@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Changed — capture no longer asks after routine edits.** Claude Code labels every Stop-hook ask "Stop
+hook error occurred", so asking after every editing turn made a typo fix look like a failure. The ask
+now comes only when the turn looks like it chose something: the user stated a rule, the agent said what
+it picked over what, or the turn created a file. Measured on 36 recorded sessions: 0/12 no-decision
+turns asked, 24/30 decision turns asked. `TRAILSTONE_CAPTURE=always` restores asking every time.
+
 ## 0.3.5
 
 **Changed — an agent can only propose a new goal.** The goal is shown to the agent every session and

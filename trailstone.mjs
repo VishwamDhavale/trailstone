@@ -619,6 +619,7 @@ async function hook() {
     let turn = null; try { turn = lastTurn(input.transcript_path); } catch {}
     const touched = (turn?.files || []).map(rel).filter((f) => f && !f.startsWith(".."));
     if (!touched.length) process.exit(0);
+    if (process.env.TRAILSTONE_CAPTURE !== "always" && !choiceSignal(turn)) process.exit(0); // a routine edit: no ask, no "error" label
     const { gov, props } = askContext(rows, touched, turn);
     process.stdout.write(JSON.stringify({ decision: "block", reason: inbandAsk(touched, gov, props), systemMessage: INBAND_NOTE }));
     process.exit(0);
@@ -861,13 +862,24 @@ export function lastTurn(transcriptPath) {
   const turnRows = rows.slice(start + 1);
   const assistant = turnRows.filter((r) => r.type === "assistant").map((r) => textOf(r.message?.content)).filter(Boolean).join("\n");
   if (!assistant.trim()) return null; // the assistant said nothing → nothing to judge
-  const files = new Set();
+  const files = new Set(); let wrote = false;
   for (const r of turnRows) for (const b of (Array.isArray(r.message?.content) ? r.message.content : [])) {
     const p = b?.type === "tool_use" && (b.input?.file_path || b.input?.notebook_path);
     if (typeof p === "string" && p) files.add(p);
+    if (b?.type === "tool_use" && b.name === "Write") wrote = true;
   }
-  return { userAsk: textOf(rows[start]?.message?.content), assistant, files: [...files] };
+  return { userAsk: textOf(rows[start]?.message?.content), assistant, files: [...files], wrote };
 }
+// Does this turn look like it CHOSE something? Claude Code labels every Stop ask "Stop hook error
+// occurred", so asking after every editing turn made routine edits look like failures. Measured on the
+// capture-inband transcripts (36 runs): these signals fire on 0/12 no-decision turns (a typo, a
+// validation) and 24/30 turns that made a choice — the user stating a rule, the agent saying what it
+// chose over what, or a new file (a new module, a new store). TRAILSTONE_CAPTURE=always asks every time.
+// ponytail: lexical; an agent-chosen scheme it never names ("added page/limit") goes unasked (3/6 there).
+export const choiceSignal = (turn) =>
+  /\b(not|never|instead|rather|always|from now on)\b/i.test(turn?.userAsk || "") ||
+  /\b(instead of|rather than|chose|chosen|choose|opted|went with|picked|in favou?r of|trade-?offs?|versus|vs\.?|over (?:a|an|the|using)\b|switch(?:ed)? (?:from|to)|replac(?:e|ed|ing) \w+ with)/i.test(turn?.assistant || "") ||
+  !!turn?.wrote;
 
 // One cheap headless call. NEVER throws: a failure (auth lapse, timeout, API error)
 // returns failed:true so the detached worker can log it instead of dying silently.
@@ -2044,6 +2056,16 @@ function selfcheck() {
     ok(again.status === 0 && !again.stdout, "in-band Stop never asks twice (stop_hook_active)");
     writeFileSync(tp, JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "just talk" }] } }));
     ok(!stop({}).stdout, "in-band Stop stays silent on a turn that wrote nothing");
+    // A routine edit is not asked about (Claude Code would label the ask an error); a turn that chose is.
+    const turnOf = (ask, said) => writeFileSync(tp, [{ type: "user", message: { content: ask } },
+      { type: "assistant", message: { content: [{ type: "text", text: said }, { type: "tool_use", name: "Edit", input: { file_path: join(dir, "src", "auth", "a.ts") } }] } }].map((x) => JSON.stringify(x)).join("\n"));
+    turnOf("fix the typo in the banner", "Fixed the typo.");
+    ok(!stop({}).stdout, "in-band Stop does not ask after a routine edit");
+    ok(/decide/.test(stop({}, "always").stdout), "…unless TRAILSTONE_CAPTURE=always");
+    turnOf("persist invoices", "Stored them in a JSON file instead of SQLite, to avoid a dependency.");
+    ok(/decide/.test(stop({}).stdout), "in-band Stop asks after a turn that says what it chose over what");
+    turnOf("amounts are integer cents from now on, never floats", "Done.");
+    ok(/decide/.test(stop({}).stdout), "…and after a turn where the user stated a rule");
     rmSync(tp);
   }
   { // doctor: silence must never be mistaken for health. The trap is a session ABOVE the repo.
