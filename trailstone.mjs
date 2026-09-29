@@ -391,8 +391,12 @@ export function stale(r, rows = load(r)) {
     const at = epoch(d.at);
     const governed = [...(d.scope || []), ...(old.scope || [])];
     if (!governed.length || !Number.isFinite(at)) continue;
+    // Same text = a RE-SCOPE, not a change of rule: files the old scope already covered still rest on
+    // the same rule, so only files the new scope newly covers need a first check. Flagging the whole
+    // old scope made every re-scope a batch of false positives to validate away (dogfood, 2 agents).
+    const rescope = d.decision === old.decision;
     for (const f of files) {
-      if (!scopeHits(governed, f) || dirty.has(f)) continue;
+      if (!(rescope ? scopeHits(d.scope, f) && !scopeHits(old.scope, f) : scopeHits(governed, f)) || dirty.has(f)) continue;
       const last = commitAt.has(f) ? commitAt.get(f) : null;
       if (last == null || last >= at) continue; // touched since → addressed
       const ok = validations.some((v) => (v.decisionId === d.id || v.decisionId === old.id) && epoch(v.at) >= at && (!v.scope?.length || scopeHits(v.scope, f)));
@@ -507,6 +511,9 @@ export function relevant(rows, { files = [], q = "", cap = 5 } = {}) {
 const whereNote = (d) => d?._from ? ` — committed on ${d._from} after this branch's copy of the ledger: it is current, and ${LEDGER} in this checkout is behind` : "";
 const line = (d) => `  - ${d.decision}${d.because ? ` [${d.because}]` : ""}${d.scope?.length ? ` (${d.scope.join(", ")})` : ""}` +
   (d.replaces ? `\n      REPLACES the earlier rule "${d.replaces}" — that one no longer applies${whereNote(d)}` : whereNote(d) ? `\n     ${whereNote(d)}` : "");
+// At session start a clean ledger used to print nothing, so an agent could not tell the check ran
+// and asked to wire it up again (dogfood). Say "clean" out loud; silence stays for the per-edit hooks.
+const sessionStale = (st) => st.length ? renderStale(st) : "Stale check ran at session start: clean — no file rests on a reversed decision.";
 function renderStale(list) {
   if (!list.length) return "";
   return "⚠️ STALE — these files were last committed BEFORE a decision governing them was reversed. Re-validate before building on them:\n" +
@@ -616,7 +623,7 @@ async function hook() {
   if (event === "SessionStart") {
     const st = stale(r, rows), n = inForce(rows).length, p = proposed(rows).length;
     logFires(r, st, "session");
-    return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`. This ledger is committed and public — for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) add \`--private\` to keep it in the gitignored, never-pushed private ledger.` + (st.length ? "\n\n" + renderStale(st) : ""));
+    return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`. This ledger is committed and public — for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) add \`--private\` to keep it in the gitignored, never-pushed private ledger.` + "\n\n" + sessionStale(st));
   }
   if (event === "UserPromptSubmit") {
     const touched = readJson(sessFile(input.session_id, "edit"), []);
@@ -1042,7 +1049,7 @@ function cursorHook(pre) {
       const ctx = `# Trailstone — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") +
         `${n} decisions in force in ${LEDGER}, ${p} proposed. Before you edit a file, run ` +
         `\`node "${SELF_CMD}" governing <file>\` and honor what comes back. Record real choices with ` +
-        `\`decide "<what>" --why "<why>" --scope <paths>\`.` + (st.length ? "\n\n" + renderStale(st) : "");
+        `\`decide "<what>" --why "<why>" --scope <paths>\`.` + "\n\n" + sessionStale(st);
       process.stdout.write(JSON.stringify({ additional_context: ctx })); process.exit(0);
     }
 
@@ -1152,8 +1159,10 @@ async function main(argv) {
     case "decide": case "reverse": {
       const rows = need(r);
       const rawRef = cmd === "reverse" ? pos.shift() : f.supersedes;
-      const text = pos.join(" ");
-      if (!text) { console.error(`usage: ${cmd} ${cmd === "reverse" ? "<id|phrase> " : ""}"<decision>" --why "<why>" --scope a,b`); process.exit(2); }
+      let text = pos.join(" ");
+      // `reverse <id> --scope …` with no text = re-scope: same rule, new files (see stale()).
+      const rescope = cmd === "reverse" && !text && scope.length;
+      if (!text && !rescope) { console.error(`usage: ${cmd} ${cmd === "reverse" ? "<id|phrase> " : ""}"<decision>" --why "<why>" --scope a,b${cmd === "reverse" ? `\n  re-scope (same rule, new files): reverse <id|phrase> --scope a,b` : ""}`); process.exit(2); }
       // An EMPTY ref is falsy, so `reverse "" "new text"` used to skip the resolve entirely and
       // write a plain decision: the old one stayed IN FORCE, nothing went stale, and the ledger
       // held two contradictory rules while the user believed the reversal had landed. `reverse`
@@ -1166,6 +1175,7 @@ async function main(argv) {
         supersedes = res.id;
       }
       const old = supersedes && rows.find((x) => x.id === supersedes);
+      if (rescope) text = old.decision;
       // Private if asked (--private), or inherited: reversing/validating a private decision stays
       // private, so a public row never reveals that a private one existed.
       const priv = !!f.private || !!(old && old._private);
@@ -1525,7 +1535,7 @@ const MCP_TOOLS = [
   { name: "governing", description: "Which decisions bind a given file. Call this BEFORE editing a file, and honor what it returns.", inputSchema: { type: "object", properties: { file: { type: "string", description: "Path to the file (absolute, or relative to the repo root)." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["file"] } },
   { name: "stale", description: "Files last committed BEFORE a decision governing them was reversed: they rest on a decision that has since changed and must be re-checked before you build on them.", inputSchema: { type: "object", properties: { repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } } } },
   { name: "decide", description: "Record a real choice that forecloses an alternative. Phrase it as 'X, not Y' so a later reversal reads as a diff. Scope it as narrowly as the change really is. The ledger is committed and public — set private=true for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) to keep it in the gitignored, never-pushed private ledger.", inputSchema: { type: "object", properties: { decision: { type: "string" }, why: { type: "string" }, scope: { type: "array", items: { type: "string" }, description: "Paths, directories or globs this decision governs." }, private: { type: "boolean", description: "Keep this decision out of the committed/pushed ledger (secrets-adjacent, strategy, unannounced plans). It still surfaces and flags stale work locally." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision"] } },
-  { name: "reverse", description: "Record that a decision has changed. Flags every tracked file that still rests on the old one.", inputSchema: { type: "object", properties: { decision_ref: { type: "string", description: "The id of the decision being reversed, or a unique phrase from its text." }, decision: { type: "string", description: "The NEW decision." }, why: { type: "string" }, scope: { type: "array", items: { type: "string" } }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision_ref", "decision"] } },
+  { name: "reverse", description: "Record that a decision has changed. Flags every tracked file that still rests on the old one.", inputSchema: { type: "object", properties: { decision_ref: { type: "string", description: "The id of the decision being reversed, or a unique phrase from its text." }, decision: { type: "string", description: "The NEW decision. Omit it (and pass scope) to re-scope the same rule: only files newly in scope get flagged." }, why: { type: "string" }, scope: { type: "array", items: { type: "string" } }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision_ref"] } },
   { name: "validate", description: "Record that you re-checked a flagged file against the decision and it still holds (this clears the flag). Set wrong=true when the file never rested on that decision at all.", inputSchema: { type: "object", properties: { decision_ref: { type: "string" }, file: { type: "string" }, wrong: { type: "boolean" }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision_ref", "file"] } },
 ];
 const MCP_INSTRUCTIONS = `Trailstone is this repo's decision ledger (.trailstone/decisions.yml).
@@ -1590,12 +1600,12 @@ function mcp(f = {}) {
         return `Recorded ${row.id}. Commit ${LEDGER} to make it bind for everyone. Scope covers ${n} tracked file(s) — a reversal will flag all ${n} to re-check.`;
       }
       case "reverse": {
-        if (!a.decision_ref || !a.decision) return "decision_ref and decision are required.";
+        if (!a.decision_ref || !(a.decision || a.scope?.length)) return "decision_ref and decision are required (or omit decision and pass scope to re-scope the same rule).";
         const res = resolveRef(a.decision_ref, live);
         if (res.error) return res.error;
         const old = all.find((x) => x.id === res.id);
         const scope = (Array.isArray(a.scope) && a.scope.length) ? a.scope : (old.scope || []);
-        const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision, why: a.why || "", scope, supersedes: res.id }, !!old._private || !!a.private);
+        const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: a.decision || old.decision, why: a.why || "", scope, supersedes: res.id }, !!old._private || !!a.private);
         const st = stale(r).filter((s) => s.replacedById === row.id), dropped = droppedBy(r, old, row);
         return `Recorded ${row.id} (supersedes ${res.id}).` + (st.length ? `\nNow stale — re-check these before building on them:\n` + st.map((s) => `  ${s.file}`).join("\n") : "\nNothing became stale.") + (dropped.length ? "\n" + narrowedNote(old, dropped) : "");
       }
@@ -2444,6 +2454,22 @@ function selfcheck() {
       run2("validate", A, "--scope", "src/shared.ts");
       const left = stale(d2);
       ok(left.length === 1 && left[0].was.startsWith("Logging"), "validating one cause leaves the other still flagged");
+      // Re-scope: same rule, wider scope. Only the newly covered file needs a first check.
+      writeFileSync(join(d2, "src", "new.ts"), "b"); gg("add", ".");
+      execFileSync("git", ["commit", "-q", "-m", "n", "--date", "2020-01-01T00:00:00Z"], { cwd: d2, env: { ...process.env, GIT_COMMITTER_DATE: "2020-01-01T00:00:00Z" } });
+      const C = idOf(run2("decide", "Money is integer cents", "--why", "w", "--scope", "src/shared.ts"));
+      const rs = spawnSync(process.execPath, [SELF, "reverse", C, "--scope", "src/shared.ts,src/new.ts"], { cwd: d2, encoding: "utf8" });
+      const byC = stale(d2).filter((s) => s.decisionId === C);
+      ok(rs.status === 0 && readFileSync(join(d2, LEDGER), "utf8").split("Money is integer cents").length === 3, `reverse <id> --scope keeps the rule's text (got: ${rs.stderr || rs.stdout.slice(0, 160)})`);
+      ok(byC.length === 1 && byC[0].file === "src/new.ts", `a re-scope flags only the newly covered file, not the old scope (got ${byC.map((s) => s.file)})`);
+      const bare = spawnSync(process.execPath, [SELF, "reverse", idOf(rs.stdout)], { cwd: d2, encoding: "utf8" });
+      ok(bare.status === 2 && /re-scope/.test(bare.stderr), "reverse with neither new text nor --scope is refused, and the usage names re-scope");
+      // A clean ledger says so at session start, instead of the silence an agent read as "never ran".
+      const ss = (input) => spawnSync(process.execPath, [SELF, "hook"], { cwd: d2, encoding: "utf8", input: JSON.stringify({ cwd: d2, ...input }) }).stdout;
+      ok(/STALE/.test(ss({ hook_event_name: "SessionStart" })), "SessionStart still shows stale files when there are some");
+      run2("validate", B, "--scope", "src/shared.ts"); run2("validate", idOf(rs.stdout), "--scope", "src/new.ts");
+      ok(/Stale check ran at session start: clean/.test(ss({ hook_event_name: "SessionStart" })), "SessionStart says 'clean' out loud when nothing is stale");
+      ok(/Stale check ran at session start: clean/.test(ss({ hook_event_name: "sessionStart", cursor_version: "1" })), "…and so does Cursor's sessionStart");
       rmSync(d2, { recursive: true, force: true });
     }
     rmSync(dir, { recursive: true, force: true });

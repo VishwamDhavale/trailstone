@@ -161,7 +161,7 @@ again after an upgrade changes them).
 
 | Hook | What it injects |
 |---|---|
-| `SessionStart` | One line: repo name, decisions in force, proposals pending — plus the stale block if any. |
+| `SessionStart` | One line: repo name, decisions in force, proposals pending — plus the stale block, or "clean" so the agent knows the check ran. |
 | `UserPromptSubmit` | Decisions relevant to *this* prompt: the ones governing files you already touched this session, then a lexical top-up (≥2 shared words) — each labelled with why it surfaced. Plus stale. Capped at 5 + 5 proposals, never padded; silent when nothing matches. |
 | `PreToolUse` (Edit/Write/MultiEdit/NotebookEdit; Codex `apply_patch`) | Before the write lands: the decisions governing each file it touches — most specific scope first, then newest, up to 10, naming any it leaves out — and a stale warning if it has one. **Once per file per rule set per session**: silent on repeat edits, but if a decision governing the file changes while the agent works (someone reversed it mid-session), the next edit says `was → now`. |
 | `Stop` | **Drift check:** if a decision governing any file the agent edited this session was reversed after it last saw that file's rules, the agent is asked **once** to re-check those files before the turn ends. **Capture:** after a turn that wrote a file *and looks like it chose something*, it asks the agent **once** to record anything the turn committed to (`decide … --proposed`) — see *Recording decisions*. Claude Code labels these "Stop hook error occurred"; Trailstone's note beside it says it is not. `TRAILSTONE_CAPTURE=always` asks after every editing turn; `=judge` swaps in the opt-in judge; `=0` turns capture off. |
@@ -251,6 +251,7 @@ goal "<what this project is>"  set the goal every session sees; run from an AI a
                               PROPOSED until you `ratify` it — an agent never changes the goal by itself
 decide "<what>" --why "<why>" --scope src/auth/,src/api/tokens.ts
 reverse <id> "<new decision>" [--why ...] [--scope ...]   # inherits the old scope if omitted
+reverse <id> --scope ...                                  # re-scope: same rule, flags only newly covered files
 list [--all]                  decisions in force (--all includes superseded/proposed/rejected)
 governing <file>              which decisions bind this file
 validate <id> --scope <file>  "I re-checked it; it holds" — clears the stale flag
