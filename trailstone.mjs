@@ -723,9 +723,10 @@ function editHook(input) {
 // Every repo the session edited is checked, not only the one it was opened in.
 // Decision ids this session recorded itself: `decide`/`reverse` print "<id> recorded", the MCP tools
 // "Recorded <id>". Read from the transcript, since a ledger row does not know its session.
+// Not \b: the transcript is JSON, so a second id in one output follows a literal "\n" — `nd_…` has no word boundary.
 function ownIds(transcriptPath) {
   let t = ""; try { t = readFileSync(transcriptPath, "utf8"); } catch { return new Set(); }
-  return new Set([...t.matchAll(/\b(d_[0-9a-f]{8}) recorded|Recorded (d_[0-9a-f]{8})/g)].map((m) => m[1] || m[2]));
+  return new Set([...t.matchAll(/(?<![0-9a-f_])(d_[0-9a-f]{8}) recorded|Recorded (d_[0-9a-f]{8})/g)].map((m) => m[1] || m[2]));
 }
 // A rule change the agent made itself is not news to it: every decision newly governing the file is
 // its own, and every one that stopped governing was superseded by one of those. Told anyway, it
@@ -2077,7 +2078,7 @@ function selfcheck() {
       const ho = (input) => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env, input: JSON.stringify({ cwd: d5, session_id: so, transcript_path: tp, ...input }) }).stdout;
       ho({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: join(d5, "src", "a.ts") } });
       append(d5, { id: "d_0aa00001", at: new Date().toISOString(), by: "t", decision: "timestamps are minutes", scope: ["src/"], supersedes: prevId });
-      writeFileSync(tp, JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: "d_0aa00001 recorded (supersedes x)." }] } }) + "\n");
+      writeFileSync(tp, JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: "d_0cc00001 recorded.\nd_0aa00001 recorded (supersedes x)." }] } }) + "\n");
       let q = {}; try { q = JSON.parse(ho({ hook_event_name: "Stop" })); } catch {}
       ok(!q.decision, `Stop stays quiet about a reversal the same session recorded (got: ${JSON.stringify(q).slice(0, 160)})`);
       append(d5, { id: "d_0bb00001", at: new Date().toISOString(), by: "t", decision: "timestamps are hours", scope: ["src/"], supersedes: "d_0aa00001" });
