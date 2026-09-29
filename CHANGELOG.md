@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.7
 
+- **Added — re-scope a decision without flagging its files.** `reverse <id> --scope a,b` (CLI, or MCP `reverse` with no `decision`) keeps the rule's text and changes only where it applies. A reversal whose text equals the old decision's is a re-scope: `stale` flags only the files the new scope newly covers, not every file the rule already governed. Agents had been re-scoping by reversing with identical text, and each one produced a batch of false positives to validate away; rows already written that way are handled too.
+- **Changed — a clean stale check says so at session start.** SessionStart (Claude Code, Codex, Cursor) now prints "Stale check ran at session start: clean" instead of nothing, so an agent can tell the check ran. Per-edit and per-prompt hooks stay silent when clean.
+- **Fixed — an agent's own second decision raised "CHANGED WHILE YOU WORKED".** Two decisions recorded in one command: the second id followed a newline in the JSON transcript and was not recognised as the session's own.
 - **Fixed — ratifying a decision raised "CHANGED WHILE YOU WORKED".** A proposal the agent was shown when it edited a file, once ratified, binds exactly the text it already read; the edit hook and the end-of-turn check no longer treat that as a rule change. A proposal made after the edit, then ratified, still asks, since the agent never saw it.
 - `homepage` in package.json points at https://trailstone.work, so npm links to the site.
 
