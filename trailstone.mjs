@@ -420,6 +420,16 @@ const firesLog = () => process.env.TRAILSTONE_FIRES_LOG || join(homedir(), ".tra
 export function readFires() {
   try { return readFileSync(firesLog(), "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; }
 }
+// This repo's fires, minus the ones a re-scope raised: before re-scopes were detected, stale() flagged
+// every file under both scopes of a same-text reversal, and those rows are still in the log (103 of
+// 107 on one dogfood repo) — counting them as "caught stale work" overstated it 25x.
+function repoFires(r, rows) {
+  const byId = new Map(rows.map((x) => [x.id, x])), repo = basename(r);
+  return readFires().filter((x) => {
+    const d = byId.get(x.replacedById), old = d && byId.get(d.supersedes);
+    return x.repo === repo && !(old && d.decision === old.decision);
+  });
+}
 export function logFires(r, list, surface) {
   try {
     if (!list?.length) return;
@@ -1095,6 +1105,15 @@ const SELF_CMD = SELF.replace(/\\/g, "/");
 function flags(argv) {
   const pos = [], f = {};
   for (let i = 0; i < argv.length; i++) argv[i].startsWith("--") ? (f[argv[i].slice(2)] = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true) : pos.push(argv[i]);
+  // `--scope a b` (space, not comma): b used to land in pos and be glued onto the decision text,
+  // silently narrowing the scope (10 of 87 decisions on one dogfood repo). Path-shaped words right
+  // after --scope's value join the scope; a quoted sentence or plain word stays text.
+  const at = argv.indexOf("--scope");
+  if (at >= 0 && typeof f.scope === "string") {
+    for (let j = at + 2; j < argv.length && !argv[j].startsWith("--") && /^\S*([/*]|\.[A-Za-z0-9]+$)\S*$/.test(argv[j]); j++) {
+      f.scope += "," + argv[j]; pos.splice(pos.indexOf(argv[j]), 1);
+    }
+  }
   return { pos, f, scope: f.scope ? String(f.scope).split(",").map((s) => s.trim()).filter(Boolean) : [] };
 }
 function need(r) { const rows = load(r); if (!rows) { console.error(`no ${LEDGER} here — run: node ${basename(SELF)} init`); process.exit(2); } return rows; }
@@ -1310,8 +1329,7 @@ function guard(r) { const st = stale(r, load(r) || []); logFires(r, st, "guard")
 // Did the one moment fire, and was it right? Unique fire = (file, reversal).
 function stats(r) {
   const rows = load(r) || [], repo = basename(r), fires = new Map(), bySurface = {};
-  for (const x of readFires()) {
-    if (x.repo !== repo) continue;
+  for (const x of repoFires(r, rows)) {
     bySurface[x.surface] = (bySurface[x.surface] || 0) + 1;
     const k = `${x.file}|${x.replacedById}`, e = fires.get(k);
     if (!e) fires.set(k, { ...x, surfaces: new Set([x.surface]) });
@@ -1419,8 +1437,7 @@ function report(r, { anon, json }) {
   const rows = load(r) || [], repo = anon ? "repo" : basename(r);
   const path = (f) => (anon ? `*${f.slice(f.lastIndexOf(".")) || ""}` : f);
   const fires = new Map(), bySurface = {};
-  for (const x of readFires()) {
-    if (x.repo !== basename(r)) continue;
+  for (const x of repoFires(r, rows)) {
     bySurface[x.surface] = (bySurface[x.surface] || 0) + 1;
     const k = `${x.file}|${x.replacedById}`;
     if (!fires.has(k) || x.at < fires.get(k).at) fires.set(k, x);
@@ -2463,6 +2480,19 @@ function selfcheck() {
       const byC = stale(d2).filter((s) => s.decisionId === C);
       ok(rs.status === 0 && readFileSync(join(d2, LEDGER), "utf8").split("Money is integer cents").length === 3, `reverse <id> --scope keeps the rule's text (got: ${rs.stderr || rs.stdout.slice(0, 160)})`);
       ok(byC.length === 1 && byC[0].file === "src/new.ts", `a re-scope flags only the newly covered file, not the old scope (got ${byC.map((s) => s.file)})`);
+      { // re-scope fires are not "caught stale work"
+        const prev = process.env.TRAILSTONE_FIRES_LOG; process.env.TRAILSTONE_FIRES_LOG = join(d2, "fires.log");
+        try { guard(d2); ok(readFires().some((x) => x.replacedById === idOf(rs.stdout)) && !repoFires(d2, load(d2)).some((x) => x.replacedById === idOf(rs.stdout)), "stats/report drop fires a re-scope raised"); }
+        finally { prev == null ? delete process.env.TRAILSTONE_FIRES_LOG : (process.env.TRAILSTONE_FIRES_LOG = prev); }
+      }
+      { // `--scope a b` with a space: b joins the scope, not the decision text
+        const o = run2("decide", "Spaced scope, not commas", "--why", "w", "--scope", "src/shared.ts", "src/new.ts");
+        const row = load(d2).find((x) => x.id === idOf(o));
+        ok(row?.decision === "Spaced scope, not commas" && row.scope.join() === "src/shared.ts,src/new.ts", `--scope a b takes both paths and leaves the text alone (got ${JSON.stringify(row && [row.decision, row.scope])})`);
+        run2("decide", "--scope", "src/new.ts", "Plain words stay text"); const t = load(d2).find((x) => x.decision?.startsWith("Plain words"));
+        ok(t?.decision === "Plain words stay text" && t.scope.join() === "src/new.ts", "a sentence after --scope's path stays the decision text");
+        run2("validate", idOf(o), "--scope", "src/new.ts");
+      }
       const bare = spawnSync(process.execPath, [SELF, "reverse", idOf(rs.stdout)], { cwd: d2, encoding: "utf8" });
       ok(bare.status === 2 && /re-scope/.test(bare.stderr), "reverse with neither new text nor --scope is refused, and the usage names re-scope");
       // A clean ledger says so at session start, instead of the silence an agent read as "never ran".
