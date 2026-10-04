@@ -192,7 +192,10 @@ What holds, and what doesn't:
 - **The false clear.** Any commit that touches a flagged file clears the flag — even
   one unrelated to the reversal. The pre-edit warning is the mitigation (whoever
   touches the file is told first), and the stale message says this plainly, but a
-  passing commit is not proof the reversal was addressed. Requiring an attributed
+  passing commit is not proof the reversal was addressed. A rebase counts as touching:
+  it resets the commit date, so work written under the old rule and rebased past the
+  reversal clears too. (Using the author date instead would trade that for false flags
+  on every amend or squash that really is the fix — invariant 2 says no.) Requiring an attributed
   re-validation to clear is a considered future option, gated on this actually
   biting in real use.
 - **It does not follow file renames.** `git mv` a governed file and it silently

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed — shell edits slipped past every hook.** A stale file changed with `sed -i`, a script or a heredoc never reached the edit hook, and an uncommitted file drops out of `stale`, so nothing told the agent and its next commit cleared the flag. The Stop hook now asks once about each stale file that became dirty this session without the edit hook seeing it. Files already uncommitted at session start are not asked about.
+- **Fixed — `decide --scope a b` put `b` in the decision text**; space-separated paths now join the scope. `stats` and `report` no longer count re-scope fires.
+
 ## 0.3.7
 
 - **Added — re-scope a decision without flagging its files.** `reverse <id> --scope a,b` (CLI, or MCP `reverse` with no `decision`) keeps the rule's text and changes only where it applies. A reversal whose text equals the old decision's is a re-scope: `stale` flags only the files the new scope newly covers, not every file the rule already governed. Agents had been re-scoping by reversing with identical text, and each one produced a batch of false positives to validate away; rows already written that way are handled too.

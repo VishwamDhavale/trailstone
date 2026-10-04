@@ -377,7 +377,9 @@ function resolveRef(ref, candidates) {
 
 // Stale files: last commit before a reversal of a decision that governs them,
 // not modified in the working tree, not validated since. Latest reversal wins.
-export function stale(r, rows = load(r)) {
+// withDirty: also files with uncommitted changes (marked dirty) — what they would be if committed
+// as-is is "addressed", and nothing says they were (the Stop check for shell edits uses it).
+export function stale(r, rows = load(r), { withDirty = false } = {}) {
   if (!rows) return [];
   const byId = new Map(rows.map((x) => [x.id, x]));
   const reversals = rows.filter((x) => (x.kind ?? "decision") === "decision" && !x.status && x.supersedes && byId.has(x.supersedes));
@@ -396,7 +398,7 @@ export function stale(r, rows = load(r)) {
     // old scope made every re-scope a batch of false positives to validate away (dogfood, 2 agents).
     const rescope = d.decision === old.decision;
     for (const f of files) {
-      if (!(rescope ? scopeHits(d.scope, f) && !scopeHits(old.scope, f) : scopeHits(governed, f)) || dirty.has(f)) continue;
+      if (!(rescope ? scopeHits(d.scope, f) && !scopeHits(old.scope, f) : scopeHits(governed, f)) || (dirty.has(f) && !withDirty)) continue;
       const last = commitAt.has(f) ? commitAt.get(f) : null;
       if (last == null || last >= at) continue; // touched since → addressed
       const ok = validations.some((v) => (v.decisionId === d.id || v.decisionId === old.id) && epoch(v.at) >= at && (!v.scope?.length || scopeHits(v.scope, f)));
@@ -405,7 +407,8 @@ export function stale(r, rows = load(r)) {
       // by file alone silently dropped all but the last — you re-check against the one cause you
       // were shown, validate, the flag clears, and the file still rests on the other reversal.
       // "Names exactly which work is suspect" has to mean every cause, not the most recent one.
-      out.set(`${f}\u0000${d.id}`, { file: f, decisionId: old.id, replacedById: d.id, was: old.decision, now: d.decision, by: d.by, at: d.at });
+      out.set(`${f}\u0000${d.id}`, { file: f, decisionId: old.id, replacedById: d.id, was: old.decision, now: d.decision, by: d.by, at: d.at,
+        ...(dirty.has(f) ? { dirty: true } : {}) });
     }
   }
   return [...out.values()];
@@ -603,6 +606,8 @@ function renderDrift(rows, f, was, label = f) {
   return out;
 }
 const DRIFT_HEAD = "⚠️ CHANGED WHILE YOU WORKED — a decision governing a file you already edited this session is no longer the one you were shown. What you wrote there followed the old rule:\n";
+const SHELL_HEAD = "⚠️ CHANGED OUTSIDE THE EDIT TOOLS — these files gained uncommitted changes this session (a shell command, a script, or someone else in this checkout) without the reversal below being shown first. Committing them clears the flag, so check them now.\n";
+const SHELL_NOTE = "Trailstone: not an error — files changed outside the edit tools rest on a reversed decision; asking the agent to re-check them";
 const DRIFT_NOTE = "Trailstone: not an error — a decision was reversed while the agent worked; asking it to re-check the files it edited";
 const emit = (event, ctx) => { if (ctx) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: ctx } })); process.exit(0); };
 
@@ -631,6 +636,9 @@ async function hook() {
   const rel = (p) => repoRel(r, p);
 
   if (event === "SessionStart") {
+    // What was already uncommitted before this session wrote anything: the Stop check for shell edits
+    // asks only about files that became dirty since, not the user's own work in progress.
+    try { writeFileSync(sessFile(input.session_id, "dirty0"), JSON.stringify([...dirtyFiles(r)])); } catch {}
     const st = stale(r, rows), n = inForce(rows).length, p = proposed(rows).length;
     logFires(r, st, "session");
     return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`. This ledger is committed and public — for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) add \`--private\` to keep it in the gitignored, never-pushed private ledger.` + "\n\n" + sessionStale(st));
@@ -765,18 +773,28 @@ function driftCheck(input) {
     else moved.push({ k, r, f, s, rows });
   }
   if (Object.keys(quiet).length) try { writeFileSync(kf, JSON.stringify({ ...seen, ...quiet })); } catch {}
-  if (!moved.length) return;
-  Object.assign(seen, quiet);
+  // Shell edits (sed -i, a heredoc, a codemod) never reach the edit hook, and an uncommitted file
+  // drops out of `stale` — so a stale file changed that way was told nothing and its next commit
+  // cleared the flag (found dogfooding). Ask once about each stale file that became dirty this
+  // session without the edit hook seeing it.
+  // ponytail: the session's own repo only; a shell edit in another repo is still missed.
   const home = root(input.cwd || process.cwd());
+  if (home && !rowsOf.has(home)) { refreshDefault(home, false); rowsOf.set(home, load(home)); } // never a 5 s wait on a turn that edited nothing
+  const rows = home && rowsOf.get(home), dirty0 = new Set(readJson(sessFile(input.session_id, "dirty0"), []));
+  const unseen = rows ? stale(home, rows, { withDirty: true }).filter((x) => x.dirty && !dirty0.has(x.file) && !(`${home}\u0000${x.file}` in seen)) : [];
+  if (!moved.length && !unseen.length) return;
+  Object.assign(seen, quiet);
+  if (unseen.length) logFires(home, unseen, "stop");
   const lines = moved.flatMap((m) => renderDrift(m.rows, m.f, m.s, m.r === home ? m.f : join(m.r, m.f)));
-  try { writeFileSync(kf, JSON.stringify({ ...seen, ...Object.fromEntries(moved.map((m) => [m.k, govSig(m.rows, m.f)])) })); } catch {}
+  try { writeFileSync(kf, JSON.stringify({ ...seen, ...Object.fromEntries(moved.map((m) => [m.k, govSig(m.rows, m.f)])),
+    ...Object.fromEntries(unseen.map((x) => [`${home}\u0000${x.file}`, govSig(rows, x.file)])) })); } catch {}
   let also = "";
-  const rows = home && (rowsOf.get(home) ?? load(home));
   if (rows && captureMode() === "inband" && input.transcript_path) try {
     const turn = lastTurn(input.transcript_path), t = (turn?.files || []).map((p) => repoRel(home, p)).filter((f) => f && !f.startsWith(".."));
     if (t.length) { const { gov, props } = askContext(rows, t, turn); also = "\n\nThen, separately: " + inbandAsk(t, gov, props); }
   } catch {}
-  process.stdout.write(JSON.stringify({ decision: "block", reason: DRIFT_HEAD + lines.join("\n") + "\nRe-check each file against the new decision and fix what still follows the old one, then say what you changed." + also, systemMessage: DRIFT_NOTE }));
+  const head = [lines.length ? DRIFT_HEAD + lines.join("\n") : "", unseen.length ? SHELL_HEAD + renderStale(unseen) : ""].filter(Boolean).join("\n\n");
+  process.stdout.write(JSON.stringify({ decision: "block", reason: head + "\nRe-check each file against the new decision and fix what still follows the old one, then say what you changed." + also, systemMessage: lines.length ? DRIFT_NOTE : SHELL_NOTE }));
   process.exit(0);
 }
 
@@ -2106,6 +2124,28 @@ function selfcheck() {
       ok(/narrower than the decision it replaces: 1 file/.test(nr) && /src\/b\.ts/.test(nr), `reverse warns when its narrower scope stops governing files (got: ${nr.slice(-240)})`);
     }
     rmSync(d5, { recursive: true, force: true });
+  }
+  { // Shell edits: a stale file changed outside the edit tools is asked about once at Stop, unless it
+    // was already dirty when the session started.
+    const d = join(tmpdir(), `trailstone-shell-${Date.now()}`); mkdirSync(join(d, "src"), { recursive: true });
+    const old = { GIT_AUTHOR_DATE: "2025-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2025-01-01T00:00:00Z" };
+    const g = (env, ...a) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd: d, encoding: "utf8", env: { ...process.env, ...env } });
+    g({}, "init", "-q"); for (const f of ["d", "e", "w"]) writeFileSync(join(d, "src", `${f}.ts`), f);
+    mkdirSync(join(d, ".trailstone")); writeFileSync(join(d, LEDGER), HEADER);
+    append(d, { id: "d_sec", at: "2025-01-01T00:00:00Z", by: "t", decision: "timestamps in seconds", scope: ["src/"] });
+    append(d, { id: "d_msx", at: "2025-06-01T00:00:00Z", by: "t", decision: "timestamps in ms", scope: ["src/"], supersedes: "d_sec" });
+    g(old, "add", "-A"); g(old, "commit", "-qm", "base");
+    const sid = `shell-${Date.now()}`, env = { ...process.env, TRAILSTONE_CAPTURE: "0", TRAILSTONE_FETCH: "0", TRAILSTONE_FIRES_LOG: join(d, "f.log"), TRAILSTONE_SHOWN_LOG: join(d, "s.log") };
+    const hk = (input) => spawnSync(process.execPath, [SELF, "hook"], { encoding: "utf8", env, input: JSON.stringify({ cwd: d, session_id: sid, ...input }) }).stdout;
+    const stop = () => { try { return JSON.parse(hk({ hook_event_name: "Stop" })); } catch { return {}; } };
+    writeFileSync(join(d, "src", "w.ts"), "user wip"); // dirty before the session
+    hk({ hook_event_name: "SessionStart" });
+    hk({ hook_event_name: "PreToolUse", tool_name: "Edit", tool_input: { file_path: join(d, "src", "e.ts") } }); writeFileSync(join(d, "src", "e.ts"), "e2");
+    writeFileSync(join(d, "src", "d.ts"), "d2"); // a sed -i: no edit hook
+    const s1 = stop();
+    ok(s1.decision === "block" && /OUTSIDE THE EDIT TOOLS/.test(s1.reason) && /src\/d\.ts/.test(s1.reason) && !/src\/[ew]\.ts/.test(s1.reason) && /outside the edit tools/.test(s1.systemMessage || ""),
+      "Stop asks about a stale file changed by a shell edit — not one the edit hook showed, not the user's prior work in progress");
+    ok(!stop().decision, "Stop asks about a shell-edited stale file once");
   }
   { // A repo reached through a symlink (macOS /var → /private/var): git reports the real root, the harness
     // the typed path. Every hook fell silent there (CI macOS/Windows since 0.2.5). Skipped where symlinks need privileges.
