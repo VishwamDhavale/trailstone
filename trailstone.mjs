@@ -812,7 +812,7 @@ function driftCheck(input) {
 }
 
 // ── passive capture ───────────────────────────────────────────────────────────
-// V0 measured it (eval/git-native-v0/RESULTS.md): the agent never ran `decide` on its
+// V0 measured it (the git-native V0 experiment): the agent never ran `decide` on its
 // own (0/3), while this judge proposed the right decision with the right scope 3/3. So
 // capture is the mechanism — inlined here, ON by default. `TRAILSTONE_CAPTURE=0` turns it
 // off; no `claude` on PATH is a silent no-op. Everything it writes is `proposed`, so a
