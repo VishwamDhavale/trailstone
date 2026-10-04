@@ -484,6 +484,19 @@ export function resolveFire(r, rows, fire) {
   return "open";
 }
 
+// A "redone" fire whose clearing commits were all WRITTEN before the reversal: a rebase or amend moved
+// old work past it (the commit date resets, the author date does not). The gate counts it as redone
+// (VISION: the false clear; author date would false-flag every amend that is the fix). This only
+// COUNTS it, so real use can say whether that false clear ever bites.
+export function rebasedClear(r, file, iso) {
+  const at = Math.floor(Date.parse(iso) / 1000);
+  try {
+    const after = git(["log", "--format=%at %ct", "--", file], r).split("\n").filter(Boolean).map((l) => l.split(" ").map(Number)).filter(([, c]) => c >= at);
+    return after.length > 0 && after.every(([a]) => a < at);
+  } catch { return false; }
+}
+const rebasedOf = (r, rows, x) => { const rev = rows.find((y) => y.id === x.replacedById); return !!rev && rebasedClear(r, x.file, rev.at); };
+
 export function staleRelevant(file, touched, prompt) {
   if (touched.includes(file)) return true;
   const p = prompt.toLowerCase();
@@ -1358,14 +1371,17 @@ function stats(r) {
     console.log("precision: n/a (no resolved fires yet)");
   } else {
     const tally = { redone: 0, holds: 0, wrong: 0, open: 0 };
+    let rebased = 0;
     const lines = [...fires.values()].sort((a, b) => a.at.localeCompare(b.at)).map((x) => {
       const how = resolveFire(r, rows, x); tally[how]++;
+      if (how === "redone" && rebasedOf(r, rows, x)) rebased++;
       return `${x.at.slice(0, 10)}  ${how.padEnd(6)}  ${x.file}  (${x.replacedById}, seen: ${[...x.surfaces].join("+")})`;
     });
     console.log(`trailstone stats — ${repo}: ${fires.size} fires`);
     console.log("by surface: " + Object.entries(bySurface).map(([s, n]) => `${s} ${n}`).join(", "));
     console.log(lines.join("\n"));
     console.log(`resolved: redone ${tally.redone}, holds ${tally.holds}, wrong ${tally.wrong}, open ${tally.open}`);
+    if (rebased) console.log(`  of the redone, ${rebased} cleared only by a rebase/amend of work written before the reversal — re-check those`);
     const judged = tally.redone + tally.holds + tally.wrong;
     console.log(judged ? `precision: ${Math.round(((tally.redone + tally.holds) / judged) * 100)}%` : "precision: n/a (no resolved fires yet)");
   }
@@ -1460,16 +1476,20 @@ function report(r, { anon, json }) {
     const k = `${x.file}|${x.replacedById}`;
     if (!fires.has(k) || x.at < fires.get(k).at) fires.set(k, x);
   }
-  const resolved = [...fires.values()].sort((a, b) => a.at.localeCompare(b.at)).map((x) => ({ at: x.at.slice(0, 10), file: path(x.file), how: resolveFire(r, rows, x) }));
+  const resolved = [...fires.values()].sort((a, b) => a.at.localeCompare(b.at)).map((x) => {
+    const how = resolveFire(r, rows, x);
+    return { at: x.at.slice(0, 10), file: path(x.file), how, ...(how === "redone" && rebasedOf(r, rows, x) ? { rebased: true } : {}) };
+  });
   const t = { redone: 0, holds: 0, wrong: 0, open: 0 };
   for (const x of resolved) t[x.how]++;
+  const rebased = resolved.filter((x) => x.rebased).length;
   const judged = t.redone + t.holds + t.wrong;
   const o = {
     version: VERSION, repo, date: new Date().toISOString().slice(0, 10),
     node: process.version, git: (() => { try { return git(["--version"], r).replace("git version ", ""); } catch { return "?"; } })(),
     goal: goal(rows) ? (anon ? "set" : goal(rows).decision) : null,
     ledger: { inForce: inForce(rows).length, proposed: proposed(rows).length, reversals: rows.filter((x) => x.supersedes).length, validations: rows.filter((x) => x.kind === "validation").length },
-    fires: { total: fires.size, bySurface, ...t, precision: judged ? Math.round(((t.redone + t.holds) / judged) * 100) : null },
+    fires: { total: fires.size, bySurface, ...t, rebased, precision: judged ? Math.round(((t.redone + t.holds) / judged) * 100) : null },
     recent: resolved.slice(-5),
     stale: stale(r, rows).map((x) => ({ file: path(x.file), was: x.was, now: x.now })),
   };
@@ -1479,7 +1499,7 @@ function report(r, { anon, json }) {
   console.log(`goal: ${o.goal ?? "(none set)"}`);
   console.log(`ledger: ${o.ledger.inForce} in force, ${o.ledger.proposed} proposed, ${o.ledger.reversals} reversals, ${o.ledger.validations} validations`);
   console.log(`fires: ${o.fires.total}${fires.size ? " — " + Object.entries(bySurface).map(([s, n]) => `${s} ${n}`).join(", ") : ""}`);
-  console.log(`resolved: redone ${t.redone}, holds ${t.holds}, wrong ${t.wrong}, open ${t.open}`);
+  console.log(`resolved: redone ${t.redone}, holds ${t.holds}, wrong ${t.wrong}, open ${t.open}${rebased ? ` (${rebased} of the redone cleared only by a rebase/amend)` : ""}`);
   console.log(`precision: ${o.fires.precision == null ? "n/a (no resolved fires yet)" : o.fires.precision + "%"}`);
   if (o.recent.length) console.log("recent:\n" + o.recent.map((x) => `  ${x.at}  ${x.how.padEnd(6)}  ${x.file}`).join("\n"));
   console.log("stale now: " + (o.stale.length ? "\n" + o.stale.map((x) => `  ${x.file} — was: ${x.was} → now: ${x.now}`).join("\n") : "clean"));
@@ -2146,6 +2166,9 @@ function selfcheck() {
     ok(s1.decision === "block" && /OUTSIDE THE EDIT TOOLS/.test(s1.reason) && /src\/d\.ts/.test(s1.reason) && !/src\/[ew]\.ts/.test(s1.reason) && /outside the edit tools/.test(s1.systemMessage || ""),
       "Stop asks about a stale file changed by a shell edit — not one the edit hook showed, not the user's prior work in progress");
     ok(!stop().decision, "Stop asks about a shell-edited stale file once");
+    g({ GIT_AUTHOR_DATE: "2025-03-01T00:00:00Z" }, "commit", "-qm", "written before, rebased after", "src/d.ts"); g({}, "commit", "-qm", "written after", "src/e.ts");
+    ok(rebasedClear(d, "src/d.ts", "2025-06-01T00:00:00Z") && !rebasedClear(d, "src/e.ts", "2025-06-01T00:00:00Z") && !rebasedClear(d, "src/w.ts", "2025-06-01T00:00:00Z"),
+      "a clear by a commit written before the reversal (rebase/amend) is counted as rebased; one written after, or none, is not");
   }
   { // A repo reached through a symlink (macOS /var → /private/var): git reports the real root, the harness
     // the typed path. Every hook fell silent there (CI macOS/Windows since 0.2.5). Skipped where symlinks need privileges.

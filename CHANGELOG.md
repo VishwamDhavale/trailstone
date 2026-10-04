@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- **Fixed — shell edits slipped past every hook.** A stale file changed with `sed -i`, a script or a heredoc never reached the edit hook, and an uncommitted file drops out of `stale`, so nothing told the agent and its next commit cleared the flag. The Stop hook now asks once about each stale file that became dirty this session without the edit hook seeing it. Files already uncommitted at session start are not asked about.
+- **Fixed — shell edits slipped past every hook.** A stale file changed with `sed -i`, a script or a heredoc never reached the edit hook, and an uncommitted file drops out of `stale`, so nothing told the agent and its next commit cleared the flag. The Stop hook now asks once about each stale file that became dirty this session without the edit hook seeing it. Files already uncommitted at session start are not asked about. Claude Code and Codex only; Cursor's stop hook does not run this check yet.
+- **Added — `stats` and `report` count rebased clears.** A fire marked redone whose clearing commits were all written before the reversal (a rebase or amend moved old work past it) is counted separately: `of the redone, N cleared only by a rebase/amend`, and `rebased` in `report --json`. The gate is unchanged — a rebase still clears a flag, as VISION's "false clear" says — this measures whether that ever matters in real use.
 - **Fixed — `decide --scope a b` put `b` in the decision text**; space-separated paths now join the scope. `stats` and `report` no longer count re-scope fires.
 
 ## 0.3.7
