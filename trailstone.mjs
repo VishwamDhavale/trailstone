@@ -914,12 +914,17 @@ const INBAND_NOTE = "Trailstone: not an error — asking the agent to record thi
 // invoices-only was later cited as the reason to page customers by offset (drift-scenarios S2).
 // And a choice that contradicts an existing decision OR proposal is a reversal, not a new row:
 // a second row beside the first left two contradicting proposals, neither superseding (same eval).
+// Who chose it sets the status: a rule the user stated is already a person's decision, so asking them
+// to ratify it again was pure friction; only the agent's own choice waits as a proposal.
+// ponytail: the agent judges who stated it; a choice it attributes to the user binds unreviewed.
+const PROP = "[--proposed]";
 export const inbandAsk = (touched, gov, props = []) =>
   `Trailstone, before you finish: did this turn COMMIT to a choice that rules out an alternative — one you made, or one the user stated and you acted on? ` +
   `Only a commitment that later work rests on counts ("retries live in the client, not the server"). NOT: what you built or fixed, a tunable value, an observation, a deferral.\n` +
-  (gov.length || props.length ? `These already cover this work — if a choice this turn contradicts one, do NOT record a second decision beside it: run node "${SELF}" reverse <id> "<what it is now>" --proposed, so the new rule supersedes the old one:\n` +
+  (gov.length || props.length ? `These already cover this work — if a choice this turn contradicts one, do NOT record a second decision beside it: run node "${SELF}" reverse <id> "<what it is now>" ${PROP}, so the new rule supersedes the old one:\n` +
     [...gov.map((d) => `  [${d.id}] ${d.decision}`), ...props.map((d) => `  [${d.id}] (proposed) ${d.decision}`)].join("\n") + "\n" : "") +
-  `For a NEW choice, run: node "${SELF}" decide "<X, not Y>" --why "<why>" --scope <every path the rule GOVERNS — a directory or glob when the rule is general, not only the files this turn touched (${touched.join(", ")})> --proposed\n` +
+  `For a NEW choice, run: node "${SELF}" decide "<X, not Y>" --why "<why>" --scope <every path the rule GOVERNS — a directory or glob when the rule is general, not only the files this turn touched (${touched.join(", ")})> ${PROP}\n` +
+  `${PROP} = add --proposed only when YOU chose it; a rule the USER stated is already their decision — record it without --proposed, so it binds now.\n` +
   `If there is nothing, record nothing. Either way, finish with one line: "Recorded: <ids>" or "No decision to record." Do not redo or extend the work.`;
 // What the ask should list: decisions in force governing the touched files or named by the turn's
 // words, and proposals scoped to those files or named by them — a proposal scoped elsewhere
@@ -2006,6 +2011,7 @@ function selfcheck() {
     const { gov, props } = askContext(pr, ["src/routes/customers.js"], turn), ask = inbandAsk(["src/routes/customers.js"], gov, props);
     ok(props.map((x) => x.id).join() === "d_cur" && /\(proposed\) GET \/invoices/.test(ask) && /do NOT record a second decision/.test(ask), "capture ask lists a same-rule proposal from another file and says reverse, not add");
     ok(/every path the rule GOVERNS/.test(ask) && !/GOVERNS, from:/.test(ask), "capture ask scopes a rule by what it governs, not only the files touched");
+    ok(/only when YOU chose it/.test(ask) && /USER stated .* without --proposed/.test(ask), "capture ask records a user-stated rule in force and proposes only the agent's own choice");
   }
   { // A new rule says what it replaces and, when it lives only on the default branch, that it is current
     // and this checkout's ledger file is behind (interactive recordings: agents stalled on both).

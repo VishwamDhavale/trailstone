@@ -164,7 +164,7 @@ again after an upgrade changes them).
 | `SessionStart` | One line: repo name, decisions in force, proposals pending — plus the stale block, or "clean" so the agent knows the check ran. |
 | `UserPromptSubmit` | Decisions relevant to *this* prompt: the ones governing files you already touched this session, then a lexical top-up (≥2 shared words) — each labelled with why it surfaced. Plus stale. Capped at 5 + 5 proposals, never padded; silent when nothing matches. |
 | `PreToolUse` (Edit/Write/MultiEdit/NotebookEdit; Codex `apply_patch`) | Before the write lands: the decisions governing each file it touches — most specific scope first, then newest, up to 10, naming any it leaves out — and a stale warning if it has one. **Once per file per rule set per session**: silent on repeat edits, but if a decision governing the file changes while the agent works (someone reversed it mid-session), the next edit says `was → now`. |
-| `Stop` | **Drift check:** if a decision governing any file the agent edited this session was reversed after it last saw that file's rules, the agent is asked **once** to re-check those files before the turn ends. **Shell edits:** a stale file that gained uncommitted changes this session without passing the edit hook (`sed -i`, a script, a heredoc) is asked about once too — files already uncommitted when the session started are left alone. **Capture:** after a turn that wrote a file *and looks like it chose something*, it asks the agent **once** to record anything the turn committed to (`decide … --proposed`) — see *Recording decisions*. Claude Code labels these "Stop hook error occurred"; Trailstone's note beside it says it is not. `TRAILSTONE_CAPTURE=always` asks after every editing turn; `=judge` swaps in the opt-in judge; `=0` turns capture off. |
+| `Stop` | **Drift check:** if a decision governing any file the agent edited this session was reversed after it last saw that file's rules, the agent is asked **once** to re-check those files before the turn ends. **Shell edits:** a stale file that gained uncommitted changes this session without passing the edit hook (`sed -i`, a script, a heredoc) is asked about once too — files already uncommitted when the session started are left alone. **Capture:** after a turn that wrote a file *and looks like it chose something*, it asks the agent **once** to record anything the turn committed to (`decide …`, `--proposed` when the agent chose it) — see *Recording decisions*. Claude Code labels these "Stop hook error occurred"; Trailstone's note beside it says it is not. `TRAILSTONE_CAPTURE=always` asks after every editing turn; `=judge` swaps in the opt-in judge; `=0` turns capture off. |
 
 Budget: the caps above mean a typical injection is a handful of lines; the largest
 is SessionStart with a long stale list, which is one line per stale file. Nothing
@@ -284,8 +284,9 @@ trailstone reverse d_6d0bf686 "Sessions use a signed HttpOnly cookie, not a JWT 
 chose something* — the user stated a rule ("not", "never", "from now on"), the agent said what it
 picked over what ("instead of", "rather than"), or it created a new file — the `Stop` hook asks the
 agent once: did this turn commit to a choice that rules out an alternative — its own
-or the user's? If so, record it with `decide "X, not Y" --scope <files> --proposed`; if not, say
-"No decision to record." No second model and no second call: it is one short extra reply in the
+or the user's? If so, record it with `decide "X, not Y" --scope <files>` — in force when the user
+stated the rule (it is already their decision), with `--proposed` when the agent chose it, so a person
+ratifies only the agent's own calls. If not, say "No decision to record." No second model and no second call: it is one short extra reply in the
 session you are already running and paying for. Claude Code shows any Stop-hook ask as "Stop hook
 error occurred" — there is no output shape that avoids it — so Trailstone puts its own line beside
 it: *not an error — asking the agent to record this turn's decisions*. That label is why routine edits
