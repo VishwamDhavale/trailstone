@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed — reading a file triggered the end-of-turn decision ask.** The Stop hook counted every tool call carrying a `file_path` as an edit, so a turn that only ran Read (and said "instead of") was asked "did this turn commit to a choice?". Only Edit, MultiEdit, Write and NotebookEdit count now.
+- **Fixed — filler words matched unrelated decisions into prompts.** Prompt relevance needed two shared words of 4+ letters, and words like "with", "file", "what", "this" qualified, so most prompts pulled in decisions they had nothing to do with. Common filler no longer counts toward a match (prompt surface and the Stop ask's proposal list).
+
 ## 0.3.8
 
 - **Fixed — shell edits slipped past every hook.** A stale file changed with `sed -i`, a script or a heredoc never reached the edit hook, and an uncommitted file drops out of `stale`, so nothing told the agent and its next commit cleared the flag. The Stop hook now asks once about each stale file that became dirty this session without the edit hook seeing it. Files already uncommitted at session start are not asked about. Claude Code and Codex only; Cursor's stop hook does not run this check yet.

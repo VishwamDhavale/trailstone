@@ -509,6 +509,12 @@ export function staleRelevant(file, touched, prompt) {
 const specificity = (scope, f) => Math.max(-1, ...(scope || []).filter((p) => matches(p, f))
   .map((p) => (p === f ? 1e6 : p.replace(/\/+$/, "").split("/").length * 2 - (/[*?[]/.test(p) ? 1 : 0))));
 
+// Words a prompt and a decision can share by meaning: len>3, minus the filler every request and
+// rule carries. Without the list, "what … with" and "call … file" matched unrelated decisions into
+// every prompt on a ledger of 49 (dogfood, 2026-10-10: "with" is in 11 of them, "file" in 10).
+// ponytail: fixed English list; per-ledger document frequency if repo-specific words start matching.
+const FILLER = new Set("with that this from what when where which there their they them then than have does into only also just like make made need want should could would some more most each every time call code file files work change used using about".split(" "));
+const terms = (s) => (s.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []).filter((w) => !FILLER.has(w));
 // Surfacing: decisions governing the files in hand, then a lexical top-up from
 // the prompt (≥2 shared words, len>3). Each item says why. Capped, never padded — and never
 // silently: `more` counts what the cap left out. Governing decisions rank most specific scope
@@ -519,10 +525,10 @@ export function relevant(rows, { files = [], q = "", cap = 5 } = {}) {
   const gov = files.flatMap((f) => governing(rows, f).map((d) => ({ d, f, s: specificity(d.scope, f) })));
   gov.sort((a, b) => b.s - a.s || String(b.d.at).localeCompare(String(a.d.at)));
   for (const { d, f } of gov) if (!seen.has(d.id)) seen.set(d.id, { ...d, because: `scope: ${f}` });
-  const words = new Set((q.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []));
+  const words = new Set(terms(q));
   if (words.size) for (const d of inForce(rows)) {
     if (seen.has(d.id)) continue;
-    const hit = (d.decision.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []).filter((w) => words.has(w));
+    const hit = terms(d.decision).filter((w) => words.has(w));
     if (new Set(hit).size >= 2) seen.set(d.id, { ...d, because: `prompt: ${[...new Set(hit)].slice(0, 3).join(" ")}` });
   }
   // A rule that replaced another says so, and a rule that lives only on the default branch says where:
@@ -917,9 +923,9 @@ export const inbandAsk = (touched, gov, props = []) =>
 export function askContext(rows, touched, turn) {
   const q = `${turn?.userAsk || ""} ${turn?.assistant || ""}`;
   const gov = relevant(rows, { files: touched, q, cap: 10 }).decisions;
-  const words = new Set((q.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []));
+  const words = new Set(terms(q));
   const props = proposed(rows).filter((p) => touched.some((f) => scopeHits(p.scope, f)) ||
-    new Set((p.decision.toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []).filter((w) => words.has(w))).size >= 2).slice(0, 5);
+    new Set(terms(p.decision).filter((w) => words.has(w))).size >= 2).slice(0, 5);
   return { gov, props };
 }
 
@@ -942,7 +948,9 @@ export function lastTurn(transcriptPath) {
   if (!assistant.trim()) return null; // the assistant said nothing → nothing to judge
   const files = new Set(); let wrote = false;
   for (const r of turnRows) for (const b of (Array.isArray(r.message?.content) ? r.message.content : [])) {
-    const p = b?.type === "tool_use" && (b.input?.file_path || b.input?.notebook_path);
+    // Only tools that WRITE: a Read carries file_path too, and counting it asked "did you commit to a
+    // choice?" after a read-only turn (dogfood, 2026-10-10).
+    const p = b?.type === "tool_use" && /^(Edit|MultiEdit|Write|NotebookEdit)$/.test(b.name) && (b.input?.file_path || b.input?.notebook_path);
     if (typeof p === "string" && p) files.add(p);
     if (b?.type === "tool_use" && b.name === "Write") wrote = true;
   }
@@ -1973,6 +1981,7 @@ function selfcheck() {
   }
   ok(staleRelevant("src/auth/session.ts", [], "add a POST /logout endpoint in src/auth") && !staleRelevant("src/auth/session.ts", [], "fix the typo in src/ui/banner.ts") && staleRelevant("src/auth/session.ts", ["src/auth/session.ts"], "anything"), "prompt push is relevance-gated");
   ok(relevant(load(dir), { q: "how do sessions handle cookies here" }).decisions[0]?.id === "d_new", "lexical relevance");
+  ok(!relevant([{ id: "d_f", at: "2024-01-01", decision: "hooks start with a file lock", scope: [] }], { q: "what should we do with this file" }).decisions.length, "filler words alone never match a decision to a prompt");
   // Ledger scale (write-time-30): exact file → deeper dir → newer broad rule → older broad rule, and the cut is named.
   const R = (id, at, scope) => ({ id, at, by: "t", decision: `rule ${id}`, scope });
   const big = [R("b_old", "2024-01-01", ["docs/"]), R("b_new", "2025-01-01", ["docs/"]), R("c_dir", "2023-01-01", ["docs/cookbooks/"]), R("x_file", "2022-01-01", ["docs/cookbooks/a.mdx"]), R("o", "2025-06-01", ["src/"])];
@@ -2040,11 +2049,11 @@ function selfcheck() {
     const tp = join(dir, "t.jsonl");
     writeFileSync(tp, [
       { type: "user", message: { content: [{ type: "text", text: "add logout" }] } },
-      { type: "assistant", message: { content: [{ type: "text", text: "Using cookies." }, { type: "tool_use", input: { file_path: "/repo/src/auth/logout.ts" } }] } },
+      { type: "assistant", message: { content: [{ type: "text", text: "Using cookies." }, { type: "tool_use", name: "Read", input: { file_path: "/repo/src/auth/session.ts" } }, { type: "tool_use", name: "Edit", input: { file_path: "/repo/src/auth/logout.ts" } }] } },
       { type: "user", message: { content: [{ type: "tool_result", content: "ok" }] } },
     ].map((x) => JSON.stringify(x)).join("\n") + "\n");
     const t = lastTurn(tp);
-    ok(t && t.userAsk === "add logout" && t.assistant === "Using cookies." && t.files.join() === "/repo/src/auth/logout.ts", "lastTurn: ask + assistant text + the one written file");
+    ok(t && t.userAsk === "add logout" && t.assistant === "Using cookies." && t.files.join() === "/repo/src/auth/logout.ts", "lastTurn: ask + assistant text + the one written file, not the one read");
   }
   { // (P6) a hand-written comment between entries survives ratify — the file is a human's review surface
     const before = readFileSync(join(dir, LEDGER), "utf8");
