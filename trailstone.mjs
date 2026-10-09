@@ -244,10 +244,11 @@ const defaultBranch = (r) => { const t = tryGitIn(r);
 function defaultLedger(r) {
   if (_def.has(r)) return _def.get(r);
   const t = tryGitIn(r), cur = t(["symbolic-ref", "-q", "--short", "HEAD"]), b = defaultBranch(r);
-  const rows = [], have = new Set(); rows.bad = []; let label = null;
+  const rows = [], have = new Set(); rows.bad = []; rows.merged = new Set(); let label = null;
   for (const ref of b ? [b !== cur && `refs/heads/${b}`, `refs/remotes/origin/${b}`].filter(Boolean) : []) {
     const text = t(["show", `${ref}:${LEDGER_REL}`]); if (!text) continue;
     const name = ref.replace(/^refs\/(heads|remotes)\//, ""), p = yamlParse(text); label ??= name;
+    if (ref.startsWith("refs/remotes/")) for (const row of p) rows.merged.add(row.id);
     for (const row of p) if (!have.has(row.id)) { have.add(row.id); rows.push(row); }
     rows.bad.push(...p.bad.map((n) => `${name}:${LEDGER_REL}:${n}`));
   }
@@ -288,6 +289,12 @@ export function load(r) {
     for (const row of dl.rows) if (!have.has(row.id)) rows.push({ ...row, _from: dl.ref });
     rows.bad.push(...dl.rows.bad);
   }
+  // A proposal merged into origin's default branch is in force: the PR that merged it was the review
+  // (nobody ratifies proposals one by one between tasks). Origin's copy, not the local branch — a
+  // local commit is nobody's review. Goals stay proposed until a person ratifies them (agents never
+  // change the goal). `ratify` remains the path with no remote or no PR.
+  // ponytail: a direct push to the default branch counts as the review; a branch-protection check is the upgrade.
+  if (dl?.rows.merged.size) for (const row of rows) if (row.status === "proposed" && (row.kind ?? "decision") === "decision" && dl.rows.merged.has(row.id)) { delete row.status; row._merged = true; }
   // Private rows are tagged (not serialized — yamlEmit skips `_` keys) so writes route back to
   // the right file and the guard can tell public from private.
   if (hasPriv) {
@@ -2372,6 +2379,13 @@ function selfcheck() {
     ok(!run9({ hook_event_name: "Stop", session_id: sOff }, { TRAILSTONE_FETCH: "0" }).decision, "with TRAILSTONE_FETCH=0 a clone never fetches, so a pushed reversal stays unseen");
     const s9 = run9({ hook_event_name: "Stop", session_id: sA });
     ok(s9.decision === "block" && /epoch ms/.test(s9.reason || ""), "a reversal pushed from another clone reaches this clone's Stop check (fetched at Stop)");
+    // Merge is the review: a proposal on origin's default branch binds; one only on this branch, or a goal, does not.
+    append(A, { id: "d_p1", at: "2025-03-01T00:00:00Z", by: "t", decision: "branch-only proposal", scope: ["src/"], status: "proposed" });
+    append(B, { id: "d_p2", at: "2025-03-01T00:00:00Z", by: "t", decision: "merged proposal", scope: ["src/"], status: "proposed" });
+    append(B, { kind: "goal", id: "g_p3", at: "2025-03-01T00:00:00Z", by: "t", decision: "merged goal proposal", status: "proposed" });
+    g9(B, "commit", "-qm", "prop", "--", LEDGER_REL); g9(B, "push", "-q", "origin", "main"); g9(A, "fetch", "-q", "origin");
+    const ls9 = spawnSync(process.execPath, [SELF, "list"], { cwd: A, encoding: "utf8", env: { ...process.env, TRAILSTONE_FETCH: "0" } }).stdout;
+    ok(/merged proposal/.test(ls9) && !/branch-only proposal/.test(ls9) && goal(load(A))?.id !== "g_p3", "a proposal merged to origin's default branch is in force; a branch-only proposal and a merged goal proposal are not");
     rmSync(base, { recursive: true, force: true });
   }
   { // Codex edits arrive as apply_patch: tool_input.command is the patch, one call may touch several files.

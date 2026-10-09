@@ -149,7 +149,8 @@ the `scope` they re-checked, plus `wrong: true` for a false-positive fire.
 3. **Clears** three ways: edit the file in the working tree, commit it after the
    reversal, or add a `validation` row naming the decision (dated after the reversal).
 
-`status: proposed` binds nothing: not in force, never flags anything stale.
+`status: proposed` binds nothing — not in force, never flags anything stale — until a person ratifies it
+or it is merged into origin's default branch (see *Recording decisions*).
 
 ## What the hooks do
 
@@ -319,10 +320,13 @@ is missing. The most common cause is the simplest: your session is sitting one d
 *above* the repo, so there is no `.git` to walk up to. `doctor` looks one level down and names
 the directory you should be in.
 
-Proposals bind nothing: not in force, never flag anything stale, until a human ratifies.
-Review them as what they are — a diff in a file you own:
+Proposals bind nothing: not in force, never flag anything stale, until a human approves them.
+Review them as what they are — a diff in a file you own, usually in the pull request:
 
-- keep it: delete the `status: proposed` line in your editor, or `ratify <id>`
+- keep it: **merge the PR.** A proposal that is in the ledger on origin's default branch is in force —
+  the review that merged it was the approval. Without a remote or a PR: delete the `status: proposed`
+  line in your editor, or `ratify <id>`. A pushed commit straight to the default branch counts as merged.
+  Goal proposals are the exception: they bind only when a person runs `ratify`.
 - drop it: delete the entry, or `reject <id>` to keep the record
 
 ## What it deliberately does not do

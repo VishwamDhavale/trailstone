@@ -7,6 +7,7 @@
 - **Changed — proposals no longer ride every prompt.** Pending proposals are listed once at session start (Claude Code, Codex, Cursor), then only beside an edit or prompt whose files they govern. Before, with no file touched yet, every unratified proposal was repeated on every prompt.
 - **Changed — `list` prints one line per decision.** id, decision, scope; `--full` restores why, author and date (MCP `list_decisions` takes `full: true`). On a 49-decision ledger the default output drops from ~20.8k to ~7.6k characters.
 - **Changed — a rule the user stated is recorded in force.** The end-of-turn capture ask told the agent to record every choice with `--proposed`, so users had to ratify rules they had stated themselves. Now only the agent's own choices are proposed; a rule the user stated binds at once.
+- **Added — merging a proposal puts it in force.** A proposed decision that is in the ledger on origin's default branch now binds: the pull request that merged it was the review. A proposal only on your branch, or only on a local default branch, still waits. Goal proposals still need `ratify`. `ratify` stays for repos with no remote or no PRs.
 - **Fixed — `decide` told you to commit a gitignored ledger.** In a repo that keeps its ledger local, it now says the decision binds in this checkout only.
 
 ## 0.3.8
