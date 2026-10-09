@@ -252,7 +252,7 @@ goal "<what this project is>"  set the goal every session sees; run from an AI a
 decide "<what>" --why "<why>" --scope src/auth/,src/api/tokens.ts
 reverse <id> "<new decision>" [--why ...] [--scope ...]   # inherits the old scope if omitted
 reverse <id> --scope ...                                  # re-scope: same rule, flags only newly covered files
-list [--all]                  decisions in force (--all includes superseded/proposed/rejected)
+list [--all] [--full]         decisions in force, one line each (--all adds superseded/proposed/rejected; --full adds why, author, date)
 governing <file>              which decisions bind this file
 validate <id> --scope <file>  "I re-checked it; it holds" — clears the stale flag
 validate <id> --scope <file> --wrong   the fire was a false positive; the file never rested on it

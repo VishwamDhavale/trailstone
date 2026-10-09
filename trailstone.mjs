@@ -1145,6 +1145,11 @@ const SELF = fileURLToPath(import.meta.url);
 // Windows backslashes, which sh treats as escapes. Forward slashes work in node and in
 // git-bash on Windows, so normalise once and always quote at the call site.
 const SELF_CMD = SELF.replace(/\\/g, "/");
+// A gitignored ledger (Trailstone's own repo keeps its decisions local) is never committed, so "commit
+// it to make it bind" is wrong advice there.
+const ledgerIgnored = (r) => { try { git(["check-ignore", "-q", LEDGER_REL], r); return true; } catch { return false; } };
+const commitNote = (r) => ledgerIgnored(r) ? `${LEDGER} is gitignored here, so it binds in this checkout only.` : `Commit ${LEDGER} to make it bind for everyone.`;
+const compactLine = (d) => `${d.id}${d.status ? ` [${d.status}]` : ""}  ${d.decision.length > 140 ? d.decision.slice(0, 139) + "…" : d.decision}${d.scope?.length ? `  (${d.scope.join(", ")})` : ""}`;
 function flags(argv) {
   const pos = [], f = {};
   for (let i = 0; i < argv.length; i++) argv[i].startsWith("--") ? (f[argv[i].slice(2)] = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true) : pos.push(argv[i]);
@@ -1245,7 +1250,7 @@ async function main(argv) {
       const row = append(r, { id: newId("d"), at: new Date().toISOString(), by: who(r), decision: text, why: f.why || "", scope: scope.length ? scope : old?.scope || [], ...(supersedes ? { supersedes } : {}), ...(f.proposed ? { status: "proposed" } : {}) }, priv);
       console.log(priv
         ? `${row.id} recorded${supersedes ? ` (supersedes ${supersedes})` : ""} in the PRIVATE ledger (.trailstone/private.yml) — gitignored, never pushed. It works locally like any decision.`
-        : `${row.id} recorded${supersedes ? ` (supersedes ${supersedes})` : ""}. Commit ${LEDGER} to make it bind for everyone. (Sensitive? re-record with \`--private\`.)`);
+        : `${row.id} recorded${supersedes ? ` (supersedes ${supersedes})` : ""}. ${commitNote(r)} (Sensitive? re-record with \`--private\`.)`);
       // Blast radius at record time: how many files this scope covers. A reversal will make you
       // re-check EVERY one of them — most will hold, so a broad scope is a noisy reversal later.
       // Say it now, while the scope can still be narrowed. (R5's blast-radius preview, in the CLI.)
@@ -1299,7 +1304,9 @@ async function main(argv) {
       else console.log(`(nothing was stale, so this clears nothing — recorded as a re-check.)`);
       return;
     }
-    case "list": { const rows = need(r); const shown = f.all ? rows.filter((x) => (x.kind ?? "decision") === "decision") : inForce(rows); for (const d of shown) console.log(`${d.id}  ${d.at.slice(0, 10)}  ${d.by}${d.status ? ` [${d.status}]` : ""}${d.supersedes ? ` ⟵ ${d.supersedes}` : ""}\n    ${d.decision}${d.why ? `\n    why: ${d.why}` : ""}${d.scope?.length ? `\n    scope: ${d.scope.join(", ")}` : ""}`); logShown(r, "list", shown.length); return; }
+    // One line per decision by default: an agent running `list` paid ~5k tokens on a 49-row ledger,
+    // mostly the why. --full (MCP: full) prints why, author and date.
+    case "list": { const rows = need(r); const shown = f.all ? rows.filter((x) => (x.kind ?? "decision") === "decision") : inForce(rows); for (const d of shown) console.log(f.full ? `${d.id}  ${d.at.slice(0, 10)}  ${d.by}${d.status ? ` [${d.status}]` : ""}${d.supersedes ? ` ⟵ ${d.supersedes}` : ""}\n    ${d.decision}${d.why ? `\n    why: ${d.why}` : ""}${d.scope?.length ? `\n    scope: ${d.scope.join(", ")}` : ""}` : compactLine(d)); logShown(r, "list", shown.length); return; }
     case "proposed": { const p = proposed(need(r)); if (!p.length) console.log("nothing proposed"); for (const d of p) console.log(`${d.id}  ${d.decision}${d.supersedes ? `  (reverses ${d.supersedes})` : ""}${d.scope?.length ? `  [${d.scope.join(", ")}]` : ""}`); return; }
     case "ratify": return setStatus(r, need(r), pos[0], null);
     case "reject": return setStatus(r, need(r), pos[0], "rejected");
@@ -1547,8 +1554,7 @@ function doctor() {
       // Not tracked. That is a problem for a normal project — but deliberate if the ledger is
       // gitignored (a repo, like Trailstone's own, that keeps its decisions local and ships only
       // an example). Tell the two apart instead of always crying "not committed".
-      let ignored = false; try { git(["check-ignore", "-q", LEDGER_REL], r); ignored = true; } catch {}
-      if (ignored) say(true, "ledger is gitignored — kept local on purpose, never pushed (see decisions.example.yml if you ship one)");
+      if (ledgerIgnored(r)) say(true, "ledger is gitignored — kept local on purpose, never pushed (see decisions.example.yml if you ship one)");
       else say(false, "ledger is NOT committed — it binds nobody until you commit it");
     }
   }
@@ -1599,7 +1605,7 @@ function doctor() {
 // stdout carries the protocol and NOTHING else; diagnostics go to stderr.
 // Note this is strictly weaker than the Claude Code hooks: the agent must CHOOSE to ask.
 const MCP_TOOLS = [
-  { name: "list_decisions", description: "The decisions in force in this repo's ledger: what was decided, why, and which files each governs.", inputSchema: { type: "object", properties: { repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } } } },
+  { name: "list_decisions", description: "The decisions in force in this repo's ledger, one line each: id, what was decided, which files it governs. full: true adds why.", inputSchema: { type: "object", properties: { full: { type: "boolean", description: "Include each decision's why." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } } } },
   { name: "governing", description: "Which decisions bind a given file. Call this BEFORE editing a file, and honor what it returns.", inputSchema: { type: "object", properties: { file: { type: "string", description: "Path to the file (absolute, or relative to the repo root)." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["file"] } },
   { name: "stale", description: "Files last committed BEFORE a decision governing them was reversed: they rest on a decision that has since changed and must be re-checked before you build on them.", inputSchema: { type: "object", properties: { repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } } } },
   { name: "decide", description: "Record a real choice that forecloses an alternative. Phrase it as 'X, not Y' so a later reversal reads as a diff. Scope it as narrowly as the change really is. The ledger is committed and public — set private=true for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) to keep it in the gitignored, never-pushed private ledger.", inputSchema: { type: "object", properties: { decision: { type: "string" }, why: { type: "string" }, scope: { type: "array", items: { type: "string" }, description: "Paths, directories or globs this decision governs." }, private: { type: "boolean", description: "Keep this decision out of the committed/pushed ledger (secrets-adjacent, strategy, unannounced plans). It still surfaces and flags stale work locally." }, repo: { type: "string", description: "Absolute path to the repository. Pass your workspace/project root — this server may be launched from a different directory." } }, required: ["decision"] } },
@@ -1646,7 +1652,7 @@ function mcp(f = {}) {
     const live = inForce(rows || []).filter((x) => (x.kind ?? "decision") === "decision");
     switch (name) {
       case "list_decisions":
-        return live.length ? live.map((d) => `[${d.id}] ${d.decision}${d.why ? `\n  why: ${d.why}` : ""}${d.scope?.length ? `\n  scope: ${d.scope.join(", ")}` : ""}`).join("\n") : "No decisions in force.";
+        return live.length ? live.map((d) => a.full ? `[${d.id}] ${d.decision}${d.why ? `\n  why: ${d.why}` : ""}${d.scope?.length ? `\n  scope: ${d.scope.join(", ")}` : ""}` : compactLine(d)).join("\n") : "No decisions in force.";
       case "governing": {
         if (!a.file) return "file is required.";
         const prob = fileProblem(r, a.file);
@@ -1665,7 +1671,7 @@ function mcp(f = {}) {
         if (!scope.length) return `Recorded ${row.id}, but with NO scope it governs nothing and a reversal will flag nothing. Add scope to make it enforceable.`;
         const n = trackedFiles(r).filter((x) => scopeHits(scope, x)).length;
         if (!n) return `Recorded ${row.id}, but its scope (${scope.join(", ")}) matches NO tracked file in this repo — so it governs nothing and a reversal will flag nothing. Check the path (typo? outside the repo? not committed yet?) and record it again with a scope that matches, or reverse this one.`;
-        return `Recorded ${row.id}. Commit ${LEDGER} to make it bind for everyone. Scope covers ${n} tracked file(s) — a reversal will flag all ${n} to re-check.`;
+        return `Recorded ${row.id}. ${commitNote(r)} Scope covers ${n} tracked file(s) — a reversal will flag all ${n} to re-check.`;
       }
       case "reverse": {
         if (!a.decision_ref || !(a.decision || a.scope?.length)) return "decision_ref and decision are required (or omit decision and pass scope to re-scope the same rule).";
@@ -2436,6 +2442,18 @@ function selfcheck() {
       const s7 = st(d6);
       ok(s7.status === 1 && /could not read 1 ledger line/.test(s7.stderr) && /decisions\.yml:\d+/.test(s7.stderr), "an unreadable ledger line fails the guard and names file:line");
       rmSync(d5, { recursive: true, force: true }); rmSync(d6, { recursive: true, force: true });
+    }
+
+    { // list is one line per decision; decide says "commit it" only when the ledger is tracked
+      const dl = join(tmpdir(), `trailstone-list-${Date.now()}`); mkdirSync(join(dl, ".trailstone"), { recursive: true });
+      git(["init", "-q"], dl); writeFileSync(join(dl, LEDGER), HEADER);
+      const env = { ...process.env }; for (const k of ["CLAUDECODE", "CODEX_SANDBOX", "CODEX_THREAD_ID", "CURSOR_AGENT", "TRAILSTONE_AGENT"]) delete env[k];
+      const cli = (...a) => spawnSync(process.execPath, [SELF, ...a], { cwd: dl, encoding: "utf8", env }).stdout;
+      ok(/Commit .* to make it bind/.test(cli("decide", "logs are JSON lines, not text", "--why", "grep-able by jq")), "decide in a repo that tracks its ledger says to commit it");
+      ok(!/why:/.test(cli("list")) && /logs are JSON lines/.test(cli("list")) && /why: grep-able by jq/.test(cli("list", "--full")), "list is one line per decision; --full adds the why");
+      writeFileSync(join(dl, ".gitignore"), `${LEDGER_REL}\n`);
+      ok(/gitignored here/.test(cli("decide", "ids are ULIDs, not UUIDs")), "decide with a gitignored ledger says it binds locally, not 'commit it'");
+      rmSync(dl, { recursive: true, force: true });
     }
 
     // Cursor hooks. The rule that matters: this thing sits in front of every tool call in the

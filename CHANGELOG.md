@@ -5,6 +5,8 @@
 - **Fixed — reading a file triggered the end-of-turn decision ask.** The Stop hook counted every tool call carrying a `file_path` as an edit, so a turn that only ran Read (and said "instead of") was asked "did this turn commit to a choice?". Only Edit, MultiEdit, Write and NotebookEdit count now.
 - **Fixed — filler words matched unrelated decisions into prompts.** Prompt relevance needed two shared words of 4+ letters, and words like "with", "file", "what", "this" qualified, so most prompts pulled in decisions they had nothing to do with. Common filler no longer counts toward a match (prompt surface and the Stop ask's proposal list).
 - **Changed — proposals no longer ride every prompt.** Pending proposals are listed once at session start (Claude Code, Codex, Cursor), then only beside an edit or prompt whose files they govern. Before, with no file touched yet, every unratified proposal was repeated on every prompt.
+- **Changed — `list` prints one line per decision.** id, decision, scope; `--full` restores why, author and date (MCP `list_decisions` takes `full: true`). On a 49-decision ledger the default output drops from ~20.8k to ~7.6k characters.
+- **Fixed — `decide` told you to commit a gitignored ledger.** In a repo that keeps its ledger local, it now says the decision binds in this checkout only.
 
 ## 0.3.8
 
