@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.9
 
 - **Fixed — reading a file triggered the end-of-turn decision ask.** The Stop hook counted every tool call carrying a `file_path` as an edit, so a turn that only ran Read (and said "instead of") was asked "did this turn commit to a choice?". Only Edit, MultiEdit, Write and NotebookEdit count now.
 - **Fixed — filler words matched unrelated decisions into prompts.** Prompt relevance needed two shared words of 4+ letters, and words like "with", "file", "what", "this" qualified, so most prompts pulled in decisions they had nothing to do with. Common filler no longer counts toward a match (prompt surface and the Stop ask's proposal list).
