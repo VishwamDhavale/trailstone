@@ -536,7 +536,7 @@ export function relevant(rows, { files = [], q = "", cap = 5 } = {}) {
   // trusted their branch's older ledger file over it, and stalled (product-demo, interactive, 2/4 clean).
   const byId = new Map(rows.map((x) => [x.id, x]));
   const all = [...seen.values()].map((d) => ({ ...d, replaces: d.supersedes ? byId.get(d.supersedes)?.decision : undefined }));
-  return { decisions: all.slice(0, cap), more: Math.max(0, all.length - cap), proposed: proposed(rows).filter((p) => !files.length || files.some((f) => scopeHits(p.scope, f))).slice(0, cap) };
+  return { decisions: all.slice(0, cap), more: Math.max(0, all.length - cap), proposed: proposed(rows).filter((p) => files.some((f) => scopeHits(p.scope, f))).slice(0, cap) };
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────────
@@ -545,6 +545,10 @@ const line = (d) => `  - ${d.decision}${d.because ? ` [${d.because}]` : ""}${d.s
   (d.replaces ? `\n      REPLACES the earlier rule "${d.replaces}" — that one no longer applies${whereNote(d)}` : whereNote(d) ? `\n     ${whereNote(d)}` : "");
 // At session start a clean ledger used to print nothing, so an agent could not tell the check ran
 // and asked to wire it up again (dogfood). Say "clean" out loud; silence stays for the per-edit hooks.
+// Pending proposals are listed ONCE, here; after that they ride only on the files they govern. With
+// no file in hand the prompt hook used to repeat every proposal on every prompt until a person
+// ratified it — a nag that grows with each agent turn (dogfood, 2026-10-10: 3-4 on every prompt).
+const sessionProposals = (rows) => { const p = proposed(rows); return p.length ? "\n\n" + renderRelevant({ decisions: [], proposed: p.slice(0, 5) }, "") + (p.length > 5 ? `\n  …and ${p.length - 5} more — \`list\` shows them` : "") : ""; };
 const sessionStale = (st) => st.length ? renderStale(st) : "Stale check ran at session start: clean — no file rests on a reversed decision.";
 function renderStale(list) {
   if (!list.length) return "";
@@ -660,7 +664,7 @@ async function hook() {
     try { writeFileSync(sessFile(input.session_id, "dirty0"), JSON.stringify([...dirtyFiles(r)])); } catch {}
     const st = stale(r, rows), n = inForce(rows).length, p = proposed(rows).length;
     logFires(r, st, "session");
-    return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`. This ledger is committed and public — for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) add \`--private\` to keep it in the gitignored, never-pushed private ledger.` + "\n\n" + sessionStale(st));
+    return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`. This ledger is committed and public — for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) add \`--private\` to keep it in the gitignored, never-pushed private ledger.` + "\n\n" + sessionStale(st) + sessionProposals(rows));
   }
   if (event === "UserPromptSubmit") {
     const touched = readJson(sessFile(input.session_id, "edit"), []);
@@ -1099,7 +1103,7 @@ function cursorHook(pre) {
       const ctx = `# Trailstone — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") +
         `${n} decisions in force in ${LEDGER}, ${p} proposed. Before you edit a file, run ` +
         `\`node "${SELF_CMD}" governing <file>\` and honor what comes back. Record real choices with ` +
-        `\`decide "<what>" --why "<why>" --scope <paths>\`.` + "\n\n" + sessionStale(st);
+        `\`decide "<what>" --why "<why>" --scope <paths>\`.` + "\n\n" + sessionStale(st) + sessionProposals(rows);
       process.stdout.write(JSON.stringify({ additional_context: ctx })); process.exit(0);
     }
 
@@ -1982,6 +1986,8 @@ function selfcheck() {
   ok(staleRelevant("src/auth/session.ts", [], "add a POST /logout endpoint in src/auth") && !staleRelevant("src/auth/session.ts", [], "fix the typo in src/ui/banner.ts") && staleRelevant("src/auth/session.ts", ["src/auth/session.ts"], "anything"), "prompt push is relevance-gated");
   ok(relevant(load(dir), { q: "how do sessions handle cookies here" }).decisions[0]?.id === "d_new", "lexical relevance");
   ok(!relevant([{ id: "d_f", at: "2024-01-01", decision: "hooks start with a file lock", scope: [] }], { q: "what should we do with this file" }).decisions.length, "filler words alone never match a decision to a prompt");
+  { const pr = [{ id: "d_p", at: "2024-01-01", decision: "invoices page by cursor", scope: ["src/inv.ts"], status: "proposed" }];
+    ok(!relevant(pr, { q: "anything" }).proposed.length && relevant(pr, { files: ["src/inv.ts"] }).proposed.length === 1 && /d_p/.test(sessionProposals(pr)), "a proposal is listed at session start, then only with a file it governs — not on every prompt"); }
   // Ledger scale (write-time-30): exact file → deeper dir → newer broad rule → older broad rule, and the cut is named.
   const R = (id, at, scope) => ({ id, at, by: "t", decision: `rule ${id}`, scope });
   const big = [R("b_old", "2024-01-01", ["docs/"]), R("b_new", "2025-01-01", ["docs/"]), R("c_dir", "2023-01-01", ["docs/cookbooks/"]), R("x_file", "2022-01-01", ["docs/cookbooks/a.mdx"]), R("o", "2025-06-01", ["src/"])];
