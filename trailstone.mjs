@@ -1561,6 +1561,16 @@ function doctor() {
   else {
     say(true, `${inForce(rows).length} decisions in force, ${proposed(rows).length} proposed${goal(rows) ? "" : " (no goal set — `goal \"<what this project is>\"`)"}`);
     if (rows.bad.length) say(false, `ledger has ${rows.bad.length} line(s) it cannot read, so their decisions are ignored: ${rows.bad.slice(0, 5).join(", ")}`);
+    // decide warns when a scope matches nothing, but only at record time. A rename or delete later
+    // (tabs/ → pages/) leaves the decision in force, silent on every edit and every reversal.
+    const tracked = trackedFiles(r);
+    const dead = inForce(rows).map((d) => [d, (d.scope || []).filter((p) => !tracked.some((f) => matches(p, f)))]).filter(([, p]) => p.length);
+    if (dead.length) {
+      say(false, `${dead.length} decision(s) in force govern a path that matches no tracked file (renamed or deleted?), so they never surface there:`);
+      for (const [d, p] of dead.slice(0, 10)) console.log(`        ${d.id}  ${p.join(", ")}`);
+      if (dead.length > 10) console.log(`        …and ${dead.length - 10} more`);
+      console.log("        re-scope each to where the code lives now: `reverse <id> --scope <paths>`");
+    }
     try { git(["ls-files", "--error-unmatch", LEDGER], r); say(true, "ledger is committed, so it travels with a clone"); }
     catch {
       // Not tracked. That is a problem for a normal project — but deliberate if the ledger is
@@ -2560,6 +2570,8 @@ function selfcheck() {
     ok(/matches NO tracked file/.test(dec("srcc/")), "decide warns when the scope is a typo that matches nothing");
     ok(/matches NO tracked file/.test(dec("/etc/")), "decide warns when the scope is outside the repo");
     ok(/covers 1 tracked file/.test(dec("src/real.ts")), "decide still reports normally for a scope that matches");
+    const doc = spawnSync(process.execPath, [SELF, "doctor"], { cwd: dir, encoding: "utf8" }).stdout;
+    ok(/matches no tracked file/.test(doc) && /\bsrcc\/(?!\S)/.test(doc) && !/src\/real\.ts/.test(doc), `doctor names the in-force scope that matches nothing, and only that (got: ${doc.split("\n").filter((l) => /srcc|real\.ts|matches no/.test(l)).join(" | ")})`);
 
     // `reverse` with an EMPTY ref silently degraded into `decide`: the old decision stayed in
     // force, nothing went stale, and the ledger held two contradictory rules.
