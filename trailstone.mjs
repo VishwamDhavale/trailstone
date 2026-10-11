@@ -542,12 +542,23 @@ export function relevant(rows, { files = [], q = "", cap = 5 } = {}) {
   // shown a new rule with neither, agents read it as a SECOND rule contradicting the one they had, or
   // trusted their branch's older ledger file over it, and stalled (product-demo, interactive, 2/4 clean).
   const byId = new Map(rows.map((x) => [x.id, x]));
-  const all = [...seen.values()].map((d) => ({ ...d, replaces: d.supersedes ? byId.get(d.supersedes)?.decision : undefined }));
+  // A re-scope keeps the text: "REPLACES <the same rule> — no longer applies" told the agent the rule it must honor was void.
+  const all = [...seen.values()].map((d) => { const was = d.supersedes ? byId.get(d.supersedes)?.decision : undefined; return { ...d, replaces: was === d.decision ? undefined : was }; });
   return { decisions: all.slice(0, cap), more: Math.max(0, all.length - cap), proposed: proposed(rows).filter((p) => files.some((f) => scopeHits(p.scope, f))).slice(0, cap) };
 }
 
 // ── rendering ─────────────────────────────────────────────────────────────────
 const whereNote = (d) => d?._from ? ` — committed on ${d._from} after this branch's copy of the ledger: it is current, and ${LEDGER} in this checkout is behind` : "";
+// What a hook injects is paid for on every prompt and edit. Ledgers grow build-log entries (dogfood,
+// voice-engine: median 441 chars, one file governed by 42 = 13 KB per edit), so hooks carry the
+// opening clause and `governing`/`list --full` carry the rest. The CLI never trims.
+const BRIEF = 200;
+export const brief = (s) => {
+  if (!s || s.length <= BRIEF) return s;
+  const end = Math.max(...[". ", "; "].map((p) => s.lastIndexOf(p, BRIEF - 1)));
+  return (end >= BRIEF / 3 ? s.slice(0, end + 1) : s.slice(0, s.lastIndexOf(" ", BRIEF - 1))) + " …";
+};
+const trimNote = (moreCmd) => `  (… = trimmed; \`node "${SELF_CMD}" ${moreCmd === "list" ? "list --full" : moreCmd}\` prints the full text)`;
 const line = (d) => `  - ${d.decision}${d.because ? ` [${d.because}]` : ""}${d.scope?.length ? ` (${d.scope.join(", ")})` : ""}` +
   (d.replaces ? `\n      REPLACES the earlier rule "${d.replaces}" — that one no longer applies${whereNote(d)}` : whereNote(d) ? `\n     ${whereNote(d)}` : "");
 // At session start a clean ledger used to print nothing, so an agent could not tell the check ran
@@ -560,13 +571,15 @@ const sessionStale = (st) => st.length ? renderStale(st) : "Stale check ran at s
 function renderStale(list) {
   if (!list.length) return "";
   return "⚠️ STALE — these files were last committed BEFORE a decision governing them was reversed. Re-validate before building on them:\n" +
-    list.map((s) => `  - ${s.file} — was: ${s.was} → now: ${s.now} (${s.by}, ${s.at.slice(0, 10)}) [decision ${s.decisionId}]`).join("\n") +
+    // A re-scope keeps the text, so was → now printed the same rule twice (dogfood: 1.4 KB per file).
+    list.map((s) => `  - ${s.file} — ${s.was === s.now ? `newly governed by: ${brief(s.now)}` : `was: ${brief(s.was)} → now: ${brief(s.now)}`} (${s.by}, ${s.at.slice(0, 10)}) [decision ${s.decisionId}]`).join("\n") +
     "\n  This note is advisory in your session; the pre-push guard is what enforces it (a stale file fails `git push`)." +
     "\n  Reconcile: redo the file to match the current decision and commit — or, if the CLI is on your PATH, `trailstone validate <decision-id-shown-above> --scope <file>` when you re-checked and it holds, `... --wrong` when the file never rested on that decision, or `trailstone reverse <id> \"...\"` to change the decision back." +
     "\n  Note: ANY commit that touches the file clears this flag — even one unrelated to the reversal. So actually reconciling the file is on you; a passing commit is not proof it was addressed. Tell the user what changed, what you re-checked, and what you propose.";
 }
 function renderRelevant({ decisions, proposed: p, more = 0 }, heading, moreCmd = "list") {
-  const parts = [];
+  const parts = [], trimmed = [...decisions, ...p].some((d) => d.decision !== brief(d.decision) || d.replaces !== brief(d.replaces));
+  decisions = decisions.map((d) => ({ ...d, decision: brief(d.decision), replaces: brief(d.replaces) }));
   if (more) decisions = [...decisions, { decision: `…and ${more} more in force here — \`node "${SELF_CMD}" ${moreCmd}\` lists every one` }];
   // Honoring a decision is the easy half. The half that actually happens is the user asking
   // for something a decision forbids — and with no instruction for it, a weaker agent just
@@ -577,7 +590,8 @@ function renderRelevant({ decisions, proposed: p, more = 0 }, heading, moreCmd =
     "  records the change, scoped as narrowly as the change really is. A silent departure is the one thing that\n" +
     "  is not allowed. Reversing flags the work that rested on it: re-check that work, and tell the user what\n" +
     "  changed, what you re-checked, and what you propose.");
-  if (p.length) parts.push("Proposed (unconfirmed — not binding; confirm with the user, then `trailstone ratify <id>` / `reject <id>`):\n" + p.map((d) => `  - [${d.id}] ${d.decision}${d.supersedes ? ` — departs from ${d.supersedes}` : ""}`).join("\n"));
+  if (p.length) parts.push("Proposed (unconfirmed — not binding; confirm with the user, then `trailstone ratify <id>` / `reject <id>`):\n" + p.map((d) => `  - [${d.id}] ${brief(d.decision)}${d.supersedes ? ` — departs from ${d.supersedes}` : ""}`).join("\n"));
+  if (trimmed) parts.push(trimNote(moreCmd));
   return parts.join("\n\n");
 }
 
@@ -929,7 +943,7 @@ export const inbandAsk = (touched, gov, props = []) =>
   `Trailstone, before you finish: did this turn COMMIT to a choice that rules out an alternative — one you made, or one the user stated and you acted on? ` +
   `Only a commitment that later work rests on counts ("retries live in the client, not the server"). NOT: what you built or fixed, a tunable value, an observation, a deferral.\n` +
   (gov.length || props.length ? `These already cover this work — if a choice this turn contradicts one, do NOT record a second decision beside it: run node "${SELF}" reverse <id> "<what it is now>" ${PROP}, so the new rule supersedes the old one:\n` +
-    [...gov.map((d) => `  [${d.id}] ${d.decision}`), ...props.map((d) => `  [${d.id}] (proposed) ${d.decision}`)].join("\n") + "\n" : "") +
+    [...gov.map((d) => `  [${d.id}] ${brief(d.decision)}`), ...props.map((d) => `  [${d.id}] (proposed) ${brief(d.decision)}`)].join("\n") + "\n" : "") +
   `For a NEW choice, run: node "${SELF}" decide "<X, not Y>" --why "<why>" --scope <every path the rule GOVERNS — a directory or glob when the rule is general, not only the files this turn touched (${touched.join(", ")})> ${PROP}\n` +
   `${PROP} = add --proposed only when YOU chose it; a rule the USER stated is already their decision — record it without --proposed, so it binds now.\n` +
   `If there is nothing, record nothing. Either way, finish with one line: "Recorded: <ids>" or "No decision to record." Do not redo or extend the work.`;
@@ -1263,6 +1277,10 @@ async function main(argv) {
       console.log(priv
         ? `${row.id} recorded${supersedes ? ` (supersedes ${supersedes})` : ""} in the PRIVATE ledger (.trailstone/private.yml) — gitignored, never pushed. It works locally like any decision.`
         : `${row.id} recorded${supersedes ? ` (supersedes ${supersedes})` : ""}. ${commitNote(r)} (Sensitive? re-record with \`--private\`.)`);
+      // Warn, never refuse: hooks show only the first ~200 chars, so the rest of a long entry is
+      // invisible to agents. A re-scope keeps old text the agent did not write — no nag there.
+      if (text.length > 300 && text !== old?.decision)
+        console.log(`⚠ ${text.length} chars — hooks show agents only the first ~${BRIEF}. Keep the decision to "X, not Y" and move the detail to --why (\`reverse ${row.id} "<short>" --why "<detail>"\`).`);
       // Blast radius at record time: how many files this scope covers. A reversal will make you
       // re-check EVERY one of them — most will hold, so a broad scope is a noisy reversal later.
       // Say it now, while the scope can still be narrowed. (R5's blast-radius preview, in the CLI.)
@@ -2021,6 +2039,16 @@ function selfcheck() {
   const big = [R("b_old", "2024-01-01", ["docs/"]), R("b_new", "2025-01-01", ["docs/"]), R("c_dir", "2023-01-01", ["docs/cookbooks/"]), R("x_file", "2022-01-01", ["docs/cookbooks/a.mdx"]), R("o", "2025-06-01", ["src/"])];
   const rk = relevant(big, { files: ["docs/cookbooks/a.mdx"], cap: 3 });
   ok(rk.decisions.map((d) => d.id).join() === "x_file,c_dir,b_new" && rk.more === 1 && renderRelevant(rk, "h", "governing docs/cookbooks/a.mdx").includes("1 more in force here"), "relevance ranks specific-then-newest and names what the cap cut");
+  { // hooks trim long entries to the opening clause and say where the full text is; short ones pass untouched
+    const long = "Use SQLite, not Postgres; " + "detail ".repeat(60), short = "Use SQLite, not Postgres";
+    ok(brief(long).length <= BRIEF + 2 && brief(long).startsWith("Use SQLite, not Postgres; detail") && brief(long).endsWith("detail …"), `brief cuts a long entry on a word, under ${BRIEF} chars (got ${brief(long).length}: ${brief(long).slice(-20)})`);
+    ok(brief(short) === short && brief(undefined) === undefined, "brief leaves a short entry alone");
+    const out = renderRelevant({ decisions: [{ decision: long }], proposed: [] }, "h", "governing a.ts");
+    ok(!out.includes("detail ".repeat(40)) && /trimmed; .*governing a\.ts.* prints the full text/.test(out), "a trimmed hook line names the command with the full text");
+    ok(!/trimmed/.test(renderRelevant({ decisions: [{ decision: short }], proposed: [] }, "h")), "no trim note when nothing was trimmed");
+    ok(!relevant([{ id: "a", decision: "R", scope: ["f"] }, { id: "b", decision: "R", scope: ["f", "g"], supersedes: "a" }], { files: ["f"] }).decisions[0].replaces, "a re-scope is not shown as REPLACES its own text");
+    ok(/newly governed by: x/.test(renderStale([{ file: "f", was: "x", now: "x", by: "b", at: "2026-01-01", decisionId: "d" }])), "a re-scope's stale line names the rule once, not was → now twice");
+  }
   { // The capture ask (drift-scenarios S2): a proposal scoped to another file but about the same rule is
     // listed, the agent is told to reverse rather than add, and scope means what the rule governs.
     const pr = [{ id: "d_cur", at: "2025-01-01", decision: "GET /invoices paginates with an opaque cursor, not offset/limit", scope: ["src/routes/invoices.js"], status: "proposed" }];
@@ -2570,6 +2598,9 @@ function selfcheck() {
     ok(/matches NO tracked file/.test(dec("srcc/")), "decide warns when the scope is a typo that matches nothing");
     ok(/matches NO tracked file/.test(dec("/etc/")), "decide warns when the scope is outside the repo");
     ok(/covers 1 tracked file/.test(dec("src/real.ts")), "decide still reports normally for a scope that matches");
+    const longDec = spawnSync(process.execPath, [SELF, "decide", "X not Y " + "because ".repeat(50), "--scope", "src/real.ts"], { cwd: dir, encoding: "utf8" });
+    ok(longDec.status === 0 && /chars — hooks show agents only/.test(longDec.stdout), "decide records a long entry and warns, never refuses");
+    ok(!/hooks show agents only/.test(dec("src/real.ts")), "decide does not warn on a short entry");
     const doc = spawnSync(process.execPath, [SELF, "doctor"], { cwd: dir, encoding: "utf8" }).stdout;
     ok(/matches no tracked file/.test(doc) && /\bsrcc\/(?!\S)/.test(doc) && !/src\/real\.ts/.test(doc), `doctor names the in-force scope that matches nothing, and only that (got: ${doc.split("\n").filter((l) => /srcc|real\.ts|matches no/.test(l)).join(" | ")})`);
 
