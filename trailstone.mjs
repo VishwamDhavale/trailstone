@@ -580,19 +580,26 @@ function renderStale(list) {
     "\n  Reconcile: redo the file to match the current decision and commit — or, if the CLI is on your PATH, `trailstone validate <decision-id-shown-above> --scope <file>` when you re-checked and it holds, `... --wrong` when the file never rested on that decision, or `trailstone reverse <id> \"...\"` to change the decision back." +
     "\n  Note: ANY commit that touches the file clears this flag — even one unrelated to the reversal. So actually reconciling the file is on you; a passing commit is not proof it was addressed. Tell the user what changed, what you re-checked, and what you propose.";
 }
-function renderRelevant({ decisions, proposed: p, more = 0 }, heading, moreCmd = "list") {
+// The "contradicts one → say so, reverse it" paragraph is the same every time, and the prompt hook
+// repeated it on every prompt (~600 chars). Said in full once per session (SessionStart resets it, so
+// a compaction hears it again), then as one line that keeps the instruction.
+const RULE_SHORT = "\n  Contradicting one? Say which FIRST and change it with `trailstone reverse` — never depart silently.";
+const toldFile = (input) => input.session_id ? sessFile(input.session_id, "told") : null;
+const wasTold = (input) => { const f = toldFile(input); return !!f && existsSync(f); };
+const markTold = (input) => { const f = toldFile(input); if (f) try { writeFileSync(f, ""); } catch {} };
+function renderRelevant({ decisions, proposed: p, more = 0 }, heading, moreCmd = "list", full = true) {
   const parts = [], trimmed = [...decisions, ...p].some((d) => d.decision !== brief(d.decision) || d.replaces !== brief(d.replaces));
   decisions = decisions.map((d) => ({ ...d, decision: brief(d.decision), replaces: brief(d.replaces) }));
   if (more) decisions = [...decisions, { decision: `…and ${more} more in force here — \`node "${SELF_CMD}" ${moreCmd}\` lists every one` }];
   // Honoring a decision is the easy half. The half that actually happens is the user asking
   // for something a decision forbids — and with no instruction for it, a weaker agent just
   // complies and the ledger records nothing (portal organic run, 2026-09-09, arm A1).
-  if (decisions.length) parts.push(`${heading} (recorded earlier, honor them):\n` + decisions.map(line).join("\n") +
+  if (decisions.length) parts.push(`${heading} (recorded earlier, honor them):\n` + decisions.map(line).join("\n") + (!full ? RULE_SHORT :
     "\n  If what you are about to do contradicts one, say which one FIRST, and do not just comply. Changing a\n" +
     "  decision is allowed and is how this is meant to work — `trailstone reverse <id> \"<new>\" --why \"<why>\"`\n" +
     "  records the change, scoped as narrowly as the change really is. A silent departure is the one thing that\n" +
     "  is not allowed. Reversing flags the work that rested on it: re-check that work, and tell the user what\n" +
-    "  changed, what you re-checked, and what you propose.");
+    "  changed, what you re-checked, and what you propose."));
   if (p.length) parts.push("Proposed (unconfirmed — not binding; confirm with the user, then `trailstone ratify <id>` / `reject <id>`):\n" + p.map((d) => `  - [${d.id}] ${brief(d.decision)}${d.supersedes ? ` — departs from ${d.supersedes}` : ""}`).join("\n"));
   if (trimmed) parts.push(trimNote(moreCmd));
   return parts.join("\n\n");
@@ -686,6 +693,7 @@ async function hook() {
     // What was already uncommitted before this session wrote anything: the Stop check for shell edits
     // asks only about files that became dirty since, not the user's own work in progress.
     try { writeFileSync(sessFile(input.session_id, "dirty0"), JSON.stringify([...dirtyFiles(r)])); } catch {}
+    try { const t = toldFile(input); if (t) rmSync(t, { force: true }); } catch {}
     const st = stale(r, rows), n = inForce(rows).length, p = proposed(rows).length;
     logFires(r, st, "session");
     return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`. This ledger is committed and public — for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) add \`--private\` to keep it in the gitignored, never-pushed private ledger.` + "\n\n" + sessionStale(st) + sessionProposals(rows));
@@ -703,7 +711,8 @@ async function hook() {
     if (!g && !rv.decisions.length && !rv.proposed.length && !st.length) process.exit(0);
     logFires(r, st, "prompt");
     logShown(r, "prompt", rv.decisions.length);
-    return emit(event, "# Trailstone — relevant to this request\n" + [g, renderStale(st), renderRelevant(rv, "Relevant decisions in force")].filter(Boolean).join("\n\n"));
+    const full = !wasTold(input); if (full && rv.decisions.length) markTold(input);
+    return emit(event, "# Trailstone — relevant to this request\n" + [g, renderStale(st), renderRelevant(rv, "Relevant decisions in force", "list", full)].filter(Boolean).join("\n\n"));
   }
   if (event === "Stop" && captureMode() === "inband") {
     // Capture by the agent that is ALREADY running (its context, its model, its billing), instead
@@ -773,7 +782,8 @@ function editHook(input) {
       if (!drift.length && !rv.decisions.length && !rv.proposed.length && !sf1.length) continue;
       logFires(r, sf1, "edit");
       logShown(r, "edit", rv.decisions.length);
-      parts.push(`# Trailstone — governing ${label}\n` + [drift.length ? DRIFT_HEAD + drift.join("\n") : "", renderStale(sf1), renderRelevant(rv, "This file is governed by", `governing ${label}`)].filter(Boolean).join("\n\n"));
+      const full = !wasTold(input); if (full && rv.decisions.length) markTold(input);
+      parts.push(`# Trailstone — governing ${label}\n` + [drift.length ? DRIFT_HEAD + drift.join("\n") : "", renderStale(sf1), renderRelevant(rv, "This file is governed by", `governing ${label}`, full)].filter(Boolean).join("\n\n"));
     }
   }
   try { writeFileSync(kf, JSON.stringify(Object.fromEntries(Object.entries(seen).slice(-50)))); } catch {}
@@ -2248,6 +2258,10 @@ function selfcheck() {
     g({ GIT_AUTHOR_DATE: "2025-03-01T00:00:00Z" }, "commit", "-qm", "written before, rebased after", "src/d.ts"); g({}, "commit", "-qm", "written after", "src/e.ts");
     ok(rebasedClear(d, "src/d.ts", "2025-06-01T00:00:00Z") && !rebasedClear(d, "src/e.ts", "2025-06-01T00:00:00Z") && !rebasedClear(d, "src/w.ts", "2025-06-01T00:00:00Z"),
       "a clear by a commit written before the reversal (rebase/amend) is counted as rebased; one written after, or none, is not");
+    hk({ hook_event_name: "SessionStart" }); const pr = () => hk({ hook_event_name: "UserPromptSubmit", prompt: "timestamps in ms please" });
+    const p1 = pr(), p2 = pr();
+    ok(/If what you are about/.test(p1) && /timestamps in ms/.test(p2) && !/If what you are about/.test(p2) && /Contradicting one\? Say which FIRST/.test(p2),
+      "the honor-rules paragraph is said in full once per session, then as one line beside the decisions");
   }
   { // A repo reached through a symlink (macOS /var → /private/var): git reports the real root, the harness
     // the typed path. Every hook fell silent there (CI macOS/Windows since 0.2.5). Skipped where symlinks need privileges.
