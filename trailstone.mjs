@@ -559,7 +559,10 @@ export const brief = (s) => {
   return (end >= BRIEF / 3 ? s.slice(0, end + 1) : s.slice(0, s.lastIndexOf(" ", BRIEF - 1))) + " …";
 };
 const trimNote = (moreCmd) => `  (… = trimmed; \`node "${SELF_CMD}" ${moreCmd === "list" ? "list --full" : moreCmd}\` prints the full text)`;
-const line = (d) => `  - ${d.decision}${d.because ? ` [${d.because}]` : ""}${d.scope?.length ? ` (${d.scope.join(", ")})` : ""}` +
+// The full scope list was the next-biggest cost (one entry listed 13 files). An edit already names the
+// scope that matched in `because`; a prompt match keeps three paths so the agent knows where the rule lives.
+const scopeTail = (d) => !d.scope?.length || d.because?.startsWith("scope:") ? "" : ` (${d.scope.slice(0, 3).join(", ")}${d.scope.length > 3 ? `, +${d.scope.length - 3}` : ""})`;
+const line = (d) => `  - ${d.decision}${d.because ? ` [${d.because}]` : ""}${scopeTail(d)}` +
   (d.replaces ? `\n      REPLACES the earlier rule "${d.replaces}" — that one no longer applies${whereNote(d)}` : whereNote(d) ? `\n     ${whereNote(d)}` : "");
 // At session start a clean ledger used to print nothing, so an agent could not tell the check ran
 // and asked to wire it up again (dogfood). Say "clean" out loud; silence stays for the per-edit hooks.
@@ -2045,6 +2048,10 @@ function selfcheck() {
     ok(brief(short) === short && brief(undefined) === undefined, "brief leaves a short entry alone");
     const out = renderRelevant({ decisions: [{ decision: long }], proposed: [] }, "h", "governing a.ts");
     ok(!out.includes("detail ".repeat(40)) && /trimmed; .*governing a\.ts.* prints the full text/.test(out), "a trimmed hook line names the command with the full text");
+    const sc = ["a", "b", "c", "d", "e"].map((x) => `src/${x}.ts`);
+    ok(!renderRelevant({ decisions: [{ decision: short, because: "scope: src/", scope: sc }], proposed: [] }, "h").includes("src/b.ts") &&
+      renderRelevant({ decisions: [{ decision: short, because: "prompt: sqlite", scope: sc }], proposed: [] }, "h").includes("(src/a.ts, src/b.ts, src/c.ts, +2)"),
+      "an edit match drops the scope list; a prompt match keeps three paths and a count");
     ok(!/trimmed/.test(renderRelevant({ decisions: [{ decision: short }], proposed: [] }, "h")), "no trim note when nothing was trimmed");
     ok(!relevant([{ id: "a", decision: "R", scope: ["f"] }, { id: "b", decision: "R", scope: ["f", "g"], supersedes: "a" }], { files: ["f"] }).decisions[0].replaces, "a re-scope is not shown as REPLACES its own text");
     ok(/newly governed by: x/.test(renderStale([{ file: "f", was: "x", now: "x", by: "b", at: "2026-01-01", decisionId: "d" }])), "a re-scope's stale line names the rule once, not was → now twice");
