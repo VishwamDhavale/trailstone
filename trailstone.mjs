@@ -178,6 +178,11 @@ const unq = (s) => {
   if (/^'.*'$/.test(s)) return s.slice(1, -1).replace(/''/g, "'"); // hand-written; we never emit these
   if (!s.startsWith('"')) return s; try { return JSON.parse(s); } catch { return s; }
 };
+// A trailing ` # note` on a hand-edited line is a YAML comment. Kept, it became part of the value:
+// `scope: [a.ts]  # note` read as the one path "[a.ts]  # note", which governs nothing, silently.
+// A quote opens only at a scalar boundary (start, space, `[`, `,`), so `don't` is plain text and
+// `"a # b"` stays whole. An unclosed quote matches nothing, and the line is left as written.
+const COMMENT = /^((?:(?<![^\s[,])"(?:[^"\\]|\\.)*"|(?<![^\s[,])'(?:[^']|'')*'|[^"']|(?<=[^\s[,])["'])*?)\s+#.*$/;
 // `scope: [a, "b"]` — the flow form a human hand-editing the ledger reaches for first.
 const flowList = (s) => (s.slice(1, -1).match(/"(?:[^"\\]|\\.)*"|'[^']*'|[^,]+/g) || []).map((x) => unq(x.trim())).filter(Boolean);
 
@@ -201,7 +206,7 @@ export function yamlParse(text) {
   const rows = [], bad = []; let cur = null, listKey = null, m, n = 0;
   for (const raw of text.split("\n")) {
     n++;
-    const l = raw.replace(/\s+$/, "");
+    const l = raw.replace(/\s+$/, "").replace(COMMENT, "$1");
     if (!l.trim() || /^\s*#/.test(l) || l === "---") continue; // blank, comment, document start
     if ((m = l.match(/^-\s+([A-Za-z_][\w]*):(?:\s(.*))?$/))) { cur = {}; rows.push(cur); listKey = null; }
     else if (cur && (m = l.match(/^\s{2,}-\s(.*)$/))) { listKey ? cur[listKey].push(unq(m[1])) : bad.push(n); continue; }
@@ -2008,6 +2013,10 @@ function selfcheck() {
     const hand = yamlParse(`---\n- id: d_a\n  decision: x\n  scope: [src/api/, "b c.ts", 'q.ts']\n- id: d_b\n  decision: y\n  scope: src/x/\n`);
     if (JSON.stringify(hand.map((x) => x.scope)) !== JSON.stringify([["src/api/", "b c.ts", "q.ts"], ["src/x/"]]) || hand.bad.length)
       throw new Error("selfcheck FAIL: flow-list / scalar scope not read as a list");
+    // A trailing comment is not part of the value; a quoted `#` and a mid-word `#`/`'` are.
+    const cm = yamlParse(`- id: d_c\n  decision: x, not y  # note\n  why: "a # b"\n  by: don't # c\n  scope: [src/a.ts, 'b #c.ts']   # just this one\n- id: d_d\n  decision: C#, not Java\n  scope:\n    - src/b/ # c\n`);
+    if (JSON.stringify(cm.map((x) => [x.decision, x.why, x.by, x.scope])) !== JSON.stringify([["x, not y", "a # b", "don't", ["src/a.ts", "b #c.ts"]], ["C#, not Java", undefined, undefined, ["src/b/"]]]) || cm.bad.length)
+      throw new Error("selfcheck FAIL: trailing `# comment` read into the value\n" + JSON.stringify(cm));
     const broken = yamlParse(`- id: d_a\n  decision: x\n    indented: too far\n  why: |\n- id: d_b\n  decision: y\n`);
     if (JSON.stringify(broken.bad) !== JSON.stringify([3, 4]) || broken.length !== 2) // line 4 is orphaned by line 3
       throw new Error("selfcheck FAIL: an unreadable line must be counted on .bad, not silently dropped");
