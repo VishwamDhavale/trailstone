@@ -170,7 +170,13 @@ function trackedFiles(cwd) {
 }
 
 // ── yaml (just our subset: a list of flat mappings; scalars are strings) ───────
-const FIELDS = ["kind", "id", "at", "by", "decision", "why", "decisionId", "scope", "supersedes", "status", "wrong"];
+// Every row starts and ends on a line no other row has (`- id:` first, `at:` last). merge=union does
+// not keep rows whole: git trims the lines two concurrent appends share at the top or bottom and keeps
+// ONE copy. With the old order (…scope, supersedes last) two rows with the same scope merged into one
+// whole row plus a headless one: the second decision silently lost its scope and its `supersedes`, so
+// it governed nothing and reversed nothing (found testing two clones, 2026-11-18). `- kind: validation`
+// first had the same flaw at the top.
+const FIELDS = ["id", "kind", "by", "decision", "why", "decisionId", "scope", "supersedes", "status", "wrong", "at"];
 // Quote only when a plain scalar would be ambiguous — otherwise the diff stays readable.
 const q = (s) => (/^$|^[-?:,[\]{}#&*!|>'"%@`]|:\s|\s#|^\s|\s$|\n/.test(s) ||
   /^(true|false|null|yes|no|on|off|~|[-+]?(\d[\d_]*)(\.\d*)?([eE][-+]?\d+)?)$/i.test(s)) ? JSON.stringify(s) : s;
@@ -187,7 +193,8 @@ const COMMENT = /^((?:(?<![^\s[,])"(?:[^"\\]|\\.)*"|(?<![^\s[,])'(?:[^']|'')*'|[
 const flowList = (s) => (s.slice(1, -1).match(/"(?:[^"\\]|\\.)*"|'[^']*'|[^,]+/g) || []).map((x) => unq(x.trim())).filter(Boolean);
 
 export function yamlEmit(row) {
-  const keys = [...FIELDS.filter((k) => k in row), ...Object.keys(row).filter((k) => !FIELDS.includes(k) && !k.startsWith("_"))];
+  const extra = Object.keys(row).filter((k) => !FIELDS.includes(k) && !k.startsWith("_"));
+  const keys = [...FIELDS.filter((k) => k in row && k !== "at"), ...extra, ...("at" in row ? ["at"] : [])]; // `at` stays last (see FIELDS)
   const out = [];
   for (const k of keys) {
     const v = row[k];
@@ -241,7 +248,7 @@ function mainRoot(r) { // the main checkout's root when r is a linked worktree, 
 // The ledger as committed on the default branch — the local branch when HEAD is anywhere else (a
 // feature branch, a linked worktree, detached), and origin's copy of it (another clone's reversal,
 // once fetched). Rows are append-only with unique ids — the file already merges with merge=union —
-// so the union is safe.
+// so the union is safe (as long as yamlEmit keeps each row's first and last lines unique; see FIELDS).
 const tryGitIn = (r) => (a) => { try { return git(a, r); } catch { return ""; } };
 const defaultBranch = (r) => { const t = tryGitIn(r);
   return [t(["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]).replace(/^origin\//, ""), t(["config", "init.defaultBranch"]), "main", "master"]
@@ -361,6 +368,17 @@ const renderGoal = (rows) => {
     (pend.length ? `\n  Proposed goal change, NOT in force until the user runs \`trailstone ratify ${pend.at(-1).id}\`: ${pend.at(-1).decision.slice(0, 300)}` : "");
 };
 export const governing = (rows, file) => inForce(rows).filter((d) => scopeHits(d.scope, file));
+// One decision reversed twice, differently: each side reversed it on its own branch or machine,
+// merge=union kept both rows, and inForce drops only the parent — so both bind, each says it
+// REPLACES the old rule, and an agent shown both picks one or blends them. Exact (same `supersedes`,
+// different text), so it may gate. Nothing picks a winner: a human reverses the side that loses,
+// which leaves one reversal of the parent in force. Same text twice is agreement, not a conflict.
+export function conflicts(rows) {
+  const byParent = new Map(), byId = new Map(rows.map((x) => [x.id, x]));
+  for (const d of inForce(rows)) if (d.supersedes) byParent.set(d.supersedes, [...(byParent.get(d.supersedes) || []), d]);
+  return [...byParent].filter(([, s]) => new Set(s.map((d) => d.decision)).size > 1).map(([id, sides]) => ({ id, was: byId.get(id)?.decision ?? id, sides }));
+}
+const conflictsAt = (rows, f) => conflicts(rows).filter((c) => c.sides.some((d) => scopeHits(d.scope, f)));
 
 // A reversal with a narrower scope than the decision it replaces leaves the old rule governing
 // nothing in the difference: "money is integer cents" reversed for one file stopped applying to every
@@ -394,7 +412,13 @@ function resolveRef(ref, candidates) {
 export function stale(r, rows = load(r), { withDirty = false } = {}) {
   if (!rows) return [];
   const byId = new Map(rows.map((x) => [x.id, x]));
-  const reversals = rows.filter((x) => (x.kind ?? "decision") === "decision" && !x.status && x.supersedes && byId.has(x.supersedes));
+  // Skip a reversal whose rule was later CHANGED: it printed "now: <a rule that no longer holds>" beside
+  // its successor's flag (settling a conflict showed the losing side as "now"). Nothing is lost — a file
+  // older than it is older than the change too. A re-scope (same text) does not count: it flags only
+  // the files it newly covers, so the original reversal must keep flagging the rest.
+  const binding = rows.filter((x) => (x.kind ?? "decision") === "decision" && !x.status);
+  const changed = (x, depth = 0) => depth < 50 && binding.some((y) => y.supersedes === x.id && (y.decision !== x.decision || changed(y, depth + 1)));
+  const reversals = binding.filter((x) => x.supersedes && byId.has(x.supersedes) && !changed(x));
   if (!reversals.length) return [];
   const validations = rows.filter((x) => x.kind === "validation");
   const files = trackedFiles(r), dirty = dirtyFiles(r), out = new Map();
@@ -576,6 +600,7 @@ const line = (d) => `  - ${d.decision}${d.because ? ` [${d.because}]` : ""}${sco
 // ratified it — a nag that grows with each agent turn (dogfood, 2026-10-10: 3-4 on every prompt).
 const sessionProposals = (rows) => { const p = proposed(rows); return p.length ? "\n\n" + renderRelevant({ decisions: [], proposed: p.slice(0, 5) }, "") + (p.length > 5 ? `\n  …and ${p.length - 5} more — \`list\` shows them` : "") : ""; };
 const sessionStale = (st) => st.length ? renderStale(st) : "Stale check ran at session start: clean — no file rests on a reversed decision.";
+const sessionConflicts = (rows) => { const c = conflicts(rows); return c.length ? "\n\n" + renderConflicts(c) : ""; };
 function renderStale(list) {
   if (!list.length) return "";
   return "⚠️ STALE — these files were last committed BEFORE a decision governing them was reversed. Re-validate before building on them:\n" +
@@ -584,6 +609,13 @@ function renderStale(list) {
     "\n  This note is advisory in your session; the pre-push guard is what enforces it (a stale file fails `git push`)." +
     "\n  Reconcile: redo the file to match the current decision and commit — or, if the CLI is on your PATH, `trailstone validate <decision-id-shown-above> --scope <file>` when you re-checked and it holds, `... --wrong` when the file never rested on that decision, or `trailstone reverse <id> \"...\"` to change the decision back." +
     "\n  Note: ANY commit that touches the file clears this flag — even one unrelated to the reversal. So actually reconciling the file is on you; a passing commit is not proof it was addressed. Tell the user what changed, what you re-checked, and what you propose.";
+}
+function renderConflicts(list) {
+  if (!list.length) return "";
+  return "⚠️ CONFLICTING REVERSALS — one decision was reversed twice, in different directions (on two branches or machines, then merged). Both reversals are in force:\n" +
+    list.map((c) => `  - was: ${brief(c.was)} [decision ${c.id}]\n` + c.sides.map((d) => `      now: ${brief(d.decision)} (${d.by}, ${String(d.at).slice(0, 10)}) [${d.id}]${whereNote(d)}`).join("\n")).join("\n") +
+    "\n  Do not pick one or blend them. Ask the user which one holds, and build nothing that depends on it until they answer." +
+    "\n  To settle it, reverse each side that loses: `trailstone reverse <losing-id> \"<the rule that holds>\"`. Until then the pre-push guard fails.";
 }
 // The "contradicts one → say so, reverse it" paragraph is the same every time, and the prompt hook
 // repeated it on every prompt (~600 chars). Said in full once per session (SessionStart resets it, so
@@ -701,7 +733,7 @@ async function hook() {
     try { const t = toldFile(input); if (t) rmSync(t, { force: true }); } catch {}
     const st = stale(r, rows), n = inForce(rows).length, p = proposed(rows).length;
     logFires(r, st, "session");
-    return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`. This ledger is committed and public — for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) add \`--private\` to keep it in the gitignored, never-pushed private ledger.` + "\n\n" + sessionStale(st) + sessionProposals(rows));
+    return emit(event, `# Trailstone (git-native) — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") + `${n} decisions in force in .trailstone/decisions.yml, ${p} proposed. Relevant ones surface as you work; \`node ${SELF} governing <file>\` / \`list\` on demand. Record real choices with \`node ${SELF} decide "<what>" --why "<why>" --scope <paths>\`; reverse with \`reverse <id> "<new>"\`. This ledger is committed and public — for a sensitive choice (secret/credential, customer data, pricing, an unannounced plan) add \`--private\` to keep it in the gitignored, never-pushed private ledger.` + "\n\n" + sessionStale(st) + sessionConflicts(rows) + sessionProposals(rows));
   }
   if (event === "UserPromptSubmit") {
     const touched = readJson(sessFile(input.session_id, "edit"), []);
@@ -713,11 +745,13 @@ async function hook() {
     const st = stale(r, rows).filter((x) => staleRelevant(x.file, touched, input.prompt || ""));
     const rv = relevant(rows, { files: touched, q: input.prompt || "" });
     const g = renderGoal(rows);
+    // A conflict rides along only when a side of it is relevant here (SessionStart listed them all).
+    const shownIds = new Set(rv.decisions.map((d) => d.id)), cf = conflicts(rows).filter((c) => c.sides.some((d) => shownIds.has(d.id)));
     if (!g && !rv.decisions.length && !rv.proposed.length && !st.length) process.exit(0);
     logFires(r, st, "prompt");
     logShown(r, "prompt", rv.decisions.length);
     const full = !wasTold(input); if (full && rv.decisions.length) markTold(input);
-    return emit(event, "# Trailstone — relevant to this request\n" + [g, renderStale(st), renderRelevant(rv, "Relevant decisions in force", "list", full)].filter(Boolean).join("\n\n"));
+    return emit(event, "# Trailstone — relevant to this request\n" + [g, renderConflicts(cf), renderStale(st), renderRelevant(rv, "Relevant decisions in force", "list", full)].filter(Boolean).join("\n\n"));
   }
   if (event === "Stop" && captureMode() === "inband") {
     // Capture by the agent that is ALREADY running (its context, its model, its billing), instead
@@ -783,12 +817,12 @@ function editHook(input) {
       delete seen[key]; seen[key] = sig; // re-insert: the most recent entries survive the cap below
       // The edit is the moment a rule is needed, and a one-line rule is cheap: a wider cap than the
       // prompt surface, whose matches are lexical guesses.
-      const rv = relevant(rows, { files: [f], cap: 10 }), sf1 = st.filter((x) => x.file === f);
-      if (!drift.length && !rv.decisions.length && !rv.proposed.length && !sf1.length) continue;
+      const rv = relevant(rows, { files: [f], cap: 10 }), sf1 = st.filter((x) => x.file === f), cf = conflictsAt(rows, f);
+      if (!drift.length && !rv.decisions.length && !rv.proposed.length && !sf1.length && !cf.length) continue;
       logFires(r, sf1, "edit");
       logShown(r, "edit", rv.decisions.length);
       const full = !wasTold(input); if (full && rv.decisions.length) markTold(input);
-      parts.push(`# Trailstone — governing ${label}\n` + [drift.length ? DRIFT_HEAD + drift.join("\n") : "", renderStale(sf1), renderRelevant(rv, "This file is governed by", `governing ${label}`, full)].filter(Boolean).join("\n\n"));
+      parts.push(`# Trailstone — governing ${label}\n` + [renderConflicts(cf), drift.length ? DRIFT_HEAD + drift.join("\n") : "", renderStale(sf1), renderRelevant(rv, "This file is governed by", `governing ${label}`, full)].filter(Boolean).join("\n\n"));
     }
   }
   try { writeFileSync(kf, JSON.stringify(Object.fromEntries(Object.entries(seen).slice(-50)))); } catch {}
@@ -1147,7 +1181,7 @@ function cursorHook(pre) {
       const ctx = `# Trailstone — ${basename(r)}\n` + (renderGoal(rows) ? renderGoal(rows) + "\n" : "") +
         `${n} decisions in force in ${LEDGER}, ${p} proposed. Before you edit a file, run ` +
         `\`node "${SELF_CMD}" governing <file>\` and honor what comes back. Record real choices with ` +
-        `\`decide "<what>" --why "<why>" --scope <paths>\`.` + "\n\n" + sessionStale(st) + sessionProposals(rows);
+        `\`decide "<what>" --why "<why>" --scope <paths>\`.` + "\n\n" + sessionStale(st) + sessionConflicts(rows) + sessionProposals(rows);
       process.stdout.write(JSON.stringify({ additional_context: ctx })); process.exit(0);
     }
 
@@ -1159,8 +1193,8 @@ function cursorHook(pre) {
       if (!fp || !/write|edit|delete/i.test(String(input.tool_name || ""))) allow();
       const f = repoRel(r, fp);
       if (!f || f.startsWith("..")) allow();
-      const st = stale(r, rows).filter((x) => x.file === f);
-      if (!st.length) allow();
+      const st = stale(r, rows).filter((x) => x.file === f), cf = conflictsAt(rows, f);
+      if (!st.length && !cf.length) allow();
       // Once per (conversation, file): denying the retry too would trap the agent in a loop.
       // Key the dedupe by conversation AND repo: these files live in /tmp and outlive the run, so a
       // conversation id reused across repos (or a fixed one in a test) would silently suppress the
@@ -1171,8 +1205,8 @@ function cursorHook(pre) {
       logFires(r, st, "edit");
       process.stdout.write(JSON.stringify({
         permission: "deny",
-        user_message: `Trailstone: ${f} rests on a reversed decision — the agent has been told what changed.`,
-        agent_message: renderStale(st) + `\n\nThis is a ONE-TIME notice, not a refusal: make the same edit again and it will proceed. ` +
+        user_message: cf.length ? `Trailstone: a decision governing ${f} was reversed twice, differently — the agent has been told to ask you which holds.` : `Trailstone: ${f} rests on a reversed decision — the agent has been told what changed.`,
+        agent_message: [renderConflicts(cf), renderStale(st)].filter(Boolean).join("\n\n") + `\n\nThis is a ONE-TIME notice, not a refusal: make the same edit again and it will proceed. ` +
           `Re-check the file against the decision above first, and tell the user what changed, what you re-checked, and what you propose.`,
       }));
       process.exit(0);
@@ -1363,7 +1397,8 @@ async function main(argv) {
       const rows = need(r), f = pos[0] || "";
       const prob = fileProblem(r, f);
       if (prob) { console.log(`${prob}. Not answering "ungoverned" — that would read as "clear to proceed".`); return; }
-      const g = governing(rows, rel(r, f)); logShown(r, "governing", g.length); g.length ? g.forEach((d) => console.log(line(d))) : console.log("ungoverned"); return;
+      const g = governing(rows, rel(r, f)); logShown(r, "governing", g.length); g.length ? g.forEach((d) => console.log(line(d))) : console.log("ungoverned");
+      const cf = conflictsAt(rows, rel(r, f)); if (cf.length) console.log("\n" + renderConflicts(cf)); return;
     }
     case "stale": { // the guard: exit 1 on stale (or unreadable: shallow history, a ledger line it could not parse), 0 clean
       // HARD STOP before anything else: the private ledger is meant to stay local. If it got
@@ -1390,6 +1425,10 @@ async function main(argv) {
         if (st.length) console.error(renderStale(st));
         process.exit(1);
       }
+      // Two reversals of one decision both in force: whichever the pushed code followed, the ledger
+      // also says the opposite. Exact (same supersedes, different text), so it gates.
+      const cf = conflicts(load(r));
+      if (cf.length) { console.error(renderConflicts(cf)); if (st.length) console.error(renderStale(st)); process.exit(1); }
       // Same rule — never "clean" about ground we cannot see — but this one fails CLOSED: the repo
       // opted in and has a reversal to check, and a shallow history hides exactly what it needs.
       if (!st.length && load(r).some((x) => x.supersedes) && isShallow(r)) {
@@ -1597,6 +1636,12 @@ function doctor() {
   else {
     say(true, `${inForce(rows).length} decisions in force, ${proposed(rows).length} proposed${goal(rows) ? "" : " (no goal set — `goal \"<what this project is>\"`)"}`);
     if (rows.bad.length) say(false, `ledger has ${rows.bad.length} line(s) it cannot read, so their decisions are ignored: ${rows.bad.slice(0, 5).join(", ")}`);
+    const cf = conflicts(rows);
+    if (cf.length) {
+      say(false, `${cf.length} decision(s) reversed twice, in different directions — both reversals are in force and the pre-push guard fails:`);
+      for (const c of cf.slice(0, 10)) console.log(`        ${c.id} → ${c.sides.map((d) => d.id).join(" vs ")}`);
+      console.log("        reverse each side that loses: `reverse <losing-id> \"<the rule that holds>\"`");
+    }
     // decide warns when a scope matches nothing, but only at record time. A rename or delete later
     // (tabs/ → pages/) leaves the decision in force, silent on every edit and every reversal.
     const tracked = trackedFiles(r);
@@ -1717,9 +1762,10 @@ function mcp(f = {}) {
         if (prob) return `${prob}. I am not answering "ungoverned", because that would tell you the file is clear when I cannot see it.`;
         const g = governing(rows || [], rel(r, a.file));
         logShown(r, "mcp", g.length);
-        return g.length ? `Decisions governing ${a.file} — honor these:\n` + g.map((d) => `[${d.id}] ${d.decision}${d.why ? ` (why: ${d.why})` : ""}`).join("\n") : `No decision governs ${a.file}.`;
+        const cf = renderConflicts(conflictsAt(rows || [], rel(r, a.file)));
+        return (g.length ? `Decisions governing ${a.file} — honor these:\n` + g.map((d) => `[${d.id}] ${d.decision}${d.why ? ` (why: ${d.why})` : ""}`).join("\n") : `No decision governs ${a.file}.`) + (cf ? "\n\n" + cf : "");
       }
-      case "stale": { const st = stale(r, rows || []); logFires(r, st, "mcp"); return st.length ? renderStale(st) : "Clean — nothing rests on a reversed decision."; }
+      case "stale": { const st = stale(r, rows || []), cf = renderConflicts(conflicts(rows || [])); logFires(r, st, "mcp"); return [cf, st.length ? renderStale(st) : ""].filter(Boolean).join("\n\n") || "Clean — nothing rests on a reversed decision."; }
       case "decide": {
         if (!a.decision) return "decision is required.";
         if (!load(r) && !a.private) { mkdirSync(join(r, ".trailstone"), { recursive: true }); writeFileSync(join(r, LEDGER), HEADER); }
@@ -2005,10 +2051,13 @@ function selfcheck() {
   mkdirSync(join(dir, ".trailstone")); writeFileSync(join(dir, LEDGER), HEADER);
   { // yaml round-trip: the nastiest scalar we can write, then a hand-edited file
     const nasty = { id: "d_rt", at: "2020-01-01T00:00:00Z", by: "t", decision: "- use x: y, not #z\nsecond line", why: "  padded  ", scope: ["a b/**", "true"] };
-    const one = yamlEmit(nasty), got = yamlParse(one)[0];
-    if (JSON.stringify(got) !== JSON.stringify(nasty)) throw new Error("selfcheck FAIL: yaml round-trip\n" + one + JSON.stringify(got));
+    const one = yamlEmit(nasty), got = yamlParse(one)[0], sorted = (o) => JSON.stringify(Object.fromEntries(Object.entries(o).sort()));
+    if (sorted(got) !== sorted(nasty)) throw new Error("selfcheck FAIL: yaml round-trip\n" + one + JSON.stringify(got));
+    // Unique first and last line per row, or merge=union splices two concurrent rows (see FIELDS).
+    const v = yamlEmit({ kind: "validation", id: "v_1", at: "T", by: "t", decisionId: "d", scope: ["s"], extra: "e" }).trim().split("\n");
+    if (!v[0].startsWith("- id: v_1") || v.at(-1) !== "  at: T") throw new Error("selfcheck FAIL: a row must start with its id and end with `at`\n" + v.join("\n"));
     const edited = "# a comment\n\n" + one.replace("  by: t\n", "  by: t\n\n  # mid-entry note\n");
-    if (JSON.stringify(yamlParse(edited)) !== JSON.stringify([nasty])) throw new Error("selfcheck FAIL: comments/blank lines break the parse");
+    if (yamlParse(edited).length !== 1 || sorted(yamlParse(edited)[0]) !== sorted(nasty)) throw new Error("selfcheck FAIL: comments/blank lines break the parse");
     // Hand edits: a flow list or a bare scalar scope used to parse as a STRING and crash list/governing.
     const hand = yamlParse(`---\n- id: d_a\n  decision: x\n  scope: [src/api/, "b c.ts", 'q.ts']\n- id: d_b\n  decision: y\n  scope: src/x/\n`);
     if (JSON.stringify(hand.map((x) => x.scope)) !== JSON.stringify([["src/api/", "b c.ts", "q.ts"], ["src/x/"]]) || hand.bad.length)
@@ -2526,7 +2575,7 @@ function selfcheck() {
       spawnSync("git", ["clone", "-q", "--depth", "1", "file://" + (d5.startsWith("/") ? "" : "/") + toPosix(d5), d6]);
       const s6 = st(d6);
       ok(s6.status === 1 && /SHALLOW/.test(s6.stderr) && !/clean/.test(s6.stdout), "a shallow clone does NOT report 'clean' — it refuses, exit 1");
-      writeFileSync(join(d6, LEDGER), readFileSync(join(d6, LEDGER), "utf8").replace(/  supersedes: d_o(\r?\n)/, (m, eol) => `${m}    stray: indented too far${eol}`)); // CRLF on Windows checkouts
+      writeFileSync(join(d6, LEDGER), readFileSync(join(d6, LEDGER), "utf8").replace(/  supersedes: d_o\r?\n  at: [^\r\n]*(\r?\n)/, (m, eol) => `${m}    stray: indented too far${eol}`)); // CRLF on Windows checkouts; after `at`, the row's last line
       const s7 = st(d6);
       ok(s7.status === 1 && /could not read 1 ledger line/.test(s7.stderr) && /decisions\.yml:\d+/.test(s7.stderr), "an unreadable ledger line fails the guard and names file:line");
       rmSync(d5, { recursive: true, force: true }); rmSync(d6, { recursive: true, force: true });
@@ -2746,6 +2795,51 @@ function selfcheck() {
     gg("add", "-f", ".trailstone/private.yml");
     const blocked = run("stale");
     ok(blocked.status === 1 && /private\.yml is TRACKED/.test(blocked.stderr), "the guard BLOCKS a push once the private ledger is tracked");
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // One decision reversed twice, differently (two machines, merged by merge=union): both reversals
+  // are in force. Flagged at the edit and at the push, never resolved by picking one.
+  {
+    let tick = 0; // real rows carry millisecond timestamps; two rows sharing one would share their last line
+    const R = (id, decision, x = {}) => ({ id, at: `2021-01-01T00:00:00.${String(++tick).padStart(3, "0")}Z`, by: "t", decision, scope: ["src/auth/**"], ...x });
+    const base = [R("d_x", "sessions use JWT"), R("d_a", "cookies, not JWT", { supersedes: "d_x" })];
+    ok(conflicts(base).length === 0, "one reversal is not a conflict");
+    ok(conflicts([...base, R("d_b", "cookies, not JWT", { supersedes: "d_x" })]).length === 0, "two reversals to the SAME rule agree — not a conflict");
+    ok(conflicts([...base, R("d_b", "JWT with rotation", { supersedes: "d_x", status: "proposed" })]).length === 0, "a proposed second reversal binds nothing, so conflicts with nothing");
+    const two = [...base, R("d_b", "JWT with rotation", { supersedes: "d_x" })], c = conflicts(two);
+    ok(c.length === 1 && c[0].id === "d_x" && c[0].sides.map((d) => d.id).join() === "d_a,d_b" && c[0].was === "sessions use JWT", "two different reversals of one decision ARE a conflict, naming both sides");
+    ok(conflicts([...two, R("d_r", "cookies, not JWT", { supersedes: "d_b" })]).length === 0, "reversing the losing side settles it");
+
+    const dir = join(tmpdir(), `trailstone-fork-${Date.now()}`); mkdirSync(join(dir, "src", "auth"), { recursive: true });
+    const gg = (...a) => git(a, dir);
+    gg("init", "-q"); gg("config", "user.email", "t@t"); gg("config", "user.name", "t");
+    writeFileSync(join(dir, "src", "auth", "session.ts"), "x"); writeFileSync(join(dir, "src", "ui.ts"), "y"); gg("add", ".");
+    execFileSync("git", ["commit", "-q", "-m", "w", "--date", "2020-01-01T00:00:00Z"], { cwd: dir, env: { ...process.env, GIT_COMMITTER_DATE: "2020-01-01T00:00:00Z" } });
+    mkdirSync(join(dir, ".trailstone")); writeFileSync(join(dir, LEDGER), HEADER);
+    // The real path: each side reverses on its own branch, then a merge=union merge. Same scope and
+    // same `supersedes` on both rows is exactly what used to splice them into one (see FIELDS).
+    ensureMergeUnion(dir); append(dir, two[0]); gg("add", "-A"); gg("commit", "-qm", "ledger"); const main0 = gg("rev-parse", "--abbrev-ref", "HEAD").trim();
+    gg("checkout", "-qb", "bob"); append(dir, two[2]); gg("commit", "-qam", "bob");
+    gg("checkout", "-q", main0); append(dir, two[1]); gg("commit", "-qam", "alice");
+    gg("merge", "-q", "--no-edit", "bob");
+    ok(load(dir).every((x) => x.scope?.length) && load(dir).filter((x) => x.supersedes === "d_x").length === 2, "a merge=union merge of two same-scope reversals keeps both rows whole");
+    const run = (...a) => spawnSync(process.execPath, [SELF, ...a], { cwd: dir, encoding: "utf8", env: { ...process.env, TRAILSTONE_FETCH: "0" } });
+    const hk = (f) => { const o = spawnSync(process.execPath, [SELF, "hook"], { cwd: dir, encoding: "utf8", env: { ...process.env, TRAILSTONE_FETCH: "0" },
+      input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: dir, session_id: `fork-${Date.now()}-${f.length}`, tool_name: "Edit", tool_input: { file_path: join(dir, f) } }) });
+      return { status: o.status, ctx: (() => { try { return JSON.parse(o.stdout).hookSpecificOutput.additionalContext; } catch { return o.stdout; } })() }; };
+    const e1 = hk("src/auth/session.ts");
+    ok(e1.status === 0 && /CONFLICTING REVERSALS/.test(e1.ctx) && /d_a/.test(e1.ctx) && /d_b/.test(e1.ctx) && /Ask the user which one holds/.test(e1.ctx), "the edit hook names both sides on a governed file and tells the agent to ask");
+    ok(!/CONFLICTING/.test(hk("src/ui.ts").ctx), "a file outside the scope hears nothing of it");
+    const s1 = run("stale");
+    ok(s1.status === 1 && /CONFLICTING REVERSALS/.test(s1.stderr), "the push guard fails on a conflict");
+    ok(/reversed twice/.test(run("doctor").stdout), "doctor reports the conflict");
+    run("reverse", "d_b", "cookies, not JWT", "--why", "settled");
+    ok(conflicts(load(dir)).length === 0 && !/CONFLICTING/.test(run("stale").stderr), "`reverse <losing-id>` settles it and the guard stops naming it");
+    ok(stale(dir).length && stale(dir).every((s) => !/rotation/.test(s.now)), "after settling, no stale flag names the losing rule as 'now'");
+    const aId = load(dir).find((x) => x.supersedes === "d_x" && x.decision === "cookies, not JWT").id;
+    append(dir, R("d_s", "cookies, not JWT", { supersedes: aId, scope: ["src/**"] })); // re-scope: same rule, wider files
+    ok(stale(dir).some((s) => s.file === "src/auth/session.ts" && s.replacedById === aId), "a re-scope keeps the original reversal's flags (it only adds newly covered files)");
     rmSync(dir, { recursive: true, force: true });
   }
 

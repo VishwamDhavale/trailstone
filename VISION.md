@@ -203,8 +203,13 @@ What holds, and what doesn't:
 - **Re-affirming re-flags.** Reversing a decision back to its original still marks the
   resting work stale — the tool can't know your code matches the old rule again
   without a re-check.
-- **Concurrent decisions conflict.** Two branches each appending a decision produce an
-  ordinary git merge conflict in the ledger; you resolve it by keeping both.
+- **Two people can reverse the same decision.** The ledger merges with `merge=union`, so
+  two branches that each append a decision merge without a conflict and both rows are
+  kept. When both rows reverse the *same* decision in different directions, both stay in
+  force. Trailstone does not pick a winner: session start, the edit hook, `doctor` and the
+  pre-push guard name both sides, and the agent is told to ask. A human settles it by
+  reversing the side that loses. Detection is exact (same `supersedes`, different text),
+  so two reversals that mean the same thing in different words still count as a conflict.
 - **Considered and deferred: dependency cascade.** We do *not* follow imports to flag
   files that merely *depend on* a flagged file. That would trade the tool's one real
   asset — precision — for a flood of guesses. If it ever returns, only as a soft hint
