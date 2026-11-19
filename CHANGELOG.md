@@ -1,10 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.3.10
 
 - **Fixed — a merge could strip a decision's scope.** `merge=union` does not keep ledger rows whole: when two branches each appended a row ending in the same lines (the same scope, or the same `supersedes`), git kept one copy of those lines, attached to one row. The other decision lost its scope and its `supersedes`, so it governed nothing and reversed nothing, with no error. Rows are now written with `id` first and `at` last, so no two rows share a first or last line. Rows already in a ledger are unaffected; only rows appended concurrently were at risk.
 - **Added — a decision reversed twice, in different directions, is flagged.** Two people reversing the same decision on their own machines leave both reversals in force after the merge. Session start, the edit hook (Claude Code, Codex, Cursor), `governing`, MCP `governing`/`stale` and `doctor` now name both sides and tell the agent to ask the user which one holds. The pre-push guard (`stale`) fails until a human reverses the side that loses. Two reversals with the same text agree and are not flagged.
 - **Fixed — a reversal that was itself reversed still appeared as "now" in stale flags.** After a rule changed twice (A → B → C), stale flags listed both "now: B" and "now: C". Only the current rule is listed now. A re-scope (same rule, new files) still keeps the original reversal's flags.
+- **Changed — hooks carry a decision's opening clause, not its whole text.** Each decision is cut to its first ~200 characters, at a sentence or clause boundary, and marked `…`. `governing <file>` and `list --full` print the full text. One file governed by many long entries added about 13 KB to every edit. `decide` now warns when a decision is over 300 characters, and suggests moving the detail into `--why`.
+- **Changed — hook lines drop the full scope list.** The edit hook names the scope that matched the file. The prompt hook shows up to three paths and a count.
+- **Changed — the "contradicting one? say so first" paragraph is said in full once per session**, then as one line. It used to repeat on every prompt.
+- **Fixed — a re-scope read as "REPLACES" itself.** A decision re-scoped with the same text no longer tells the agent that the rule it must follow no longer applies.
+- **Added — `doctor` flags decisions whose scope matches no tracked file.** A renamed or deleted path leaves a decision in force that never surfaces anywhere. `doctor` lists each one with `reverse <id> --scope <paths>` to re-point it.
+- **Fixed — a trailing `# comment` was read into the value.** `decision: x, not y  # note` now reads as `x, not y`. A `#` inside quotes or in the middle of a word (`C#`) is kept.
 
 ## 0.3.9
 
